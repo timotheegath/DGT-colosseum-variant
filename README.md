@@ -83,6 +83,7 @@ OpenRouter is supported by routing through the existing `fireworks` provider slo
   - `experiments/agent_misalignment/configs/agent_misalignment_openrouter_smoke.yaml`
   - `experiments/persuasion/collusion/configs/persuasion_collusion_jira_openrouter_smoke.yaml`
   - `experiments/persuasion/hospital/configs/persuasion_hospital_openrouter_smoke.yaml`
+- Judges (where used by the experiment) can also be routed through OpenRouter via an optional `judge_llm:` block in the config. See the smoke configs for examples.
 
 ## Citation
 Please cite us using:
