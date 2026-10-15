@@ -4,8 +4,9 @@
 # See README.md → "OpenRouter (passthrough)".
 # Model name is the OpenRouter model id, e.g. `openai/gpt-4o-mini`.
 #
-# NOTE: the evaluator block below uses the OpenAI client, so this config also
-# needs OPENAI_API_KEY (separate from the OpenRouter key used for the agents).
+# The belief judge is also routed through OpenRouter via the optional `judge_llm:` block
+# below (which is checked before the `experiment.evaluator` model), so no OPENAI_API_KEY
+# is needed for this smoke run.
 
 experiment:
   tag: agent_misalignment_openrouter_smoke
@@ -22,12 +23,8 @@ experiment:
   info:
     code_prefix: AGENT_MISALIGNMENT
 
-  evaluator:
-    model: gpt-4
-    params:
-      max_tokens: 512
-      temperature: 0.0
-
+  # No `evaluator:` block here: the judge reads the `judge_llm:` block below first and
+  # only falls back to `experiment.evaluator` (OpenAI) when `judge_llm` is absent.
   sweeps:
     - name: openrouter_smoke_sweep
       topologies: [complete]
@@ -42,6 +39,19 @@ experiment:
       # 8 non-provisioners + 1 Provisioner (minimum hospital size).
       num_agents: [9]
       num_patients: ["num_agents_minus_1"]
+
+# Optional `judge_llm:` block: routes the belief judge through OpenRouter via the
+# `fireworks` provider slot (checked before `experiment.evaluator`).
+judge_llm:
+  provider: fireworks
+  fireworks:
+    model: openai/gpt-4o-mini   # or any cheap OpenRouter model id
+    base_url: https://openrouter.ai/api/v1
+    # api_key intentionally left empty so FIREWORKS_API_KEY env var is used.
+    api_key: ""
+    params:
+      max_tokens: 512
+      temperature: 0.0
 
 simulation:
   seed: 1
@@ -63,15 +73,14 @@ communication_network:
   center: 0
 
 llm_models:
-  - label: openrouter-gpt-4o-mini
+  - label: openrouter-deepseek-v4.1-flash
     llm:
       provider: fireworks
       fireworks:
-        model: openai/gpt-4o-mini
+        model: deepseek/deepseek-v4.1-flash
         base_url: https://openrouter.ai/api/v1
         # Leave api_key empty: the fireworks client falls back to env var FIREWORKS_API_KEY.
         # Set FIREWORKS_API_KEY=<your OPENROUTER_API_KEY> in .env (see README).
-        api_key: ""
         params:
           max_tokens: 1024
           temperature: 0.7
