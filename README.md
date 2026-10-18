@@ -9,10 +9,6 @@
 >
 > All credit for the framework, environments, and experimental design goes to the original authors. See the [Citation](#citation) section below — please cite the original work as the authors request.
 
-> [!NOTE]
-> :tada: **Colosseum has been accepted to the NeurIPS 2026 Evaluations and Datasets Track!** Read the paper on [arXiv](https://arxiv.org/abs/2602.15198).
-
-If you find the repo or paper useful or interesting please :star: it!
 ## Description
 <!-- > [!NOTE] -->
 > Colosseum is a framework for objectively auditing cooperative multi-agent systems composed of tool-calling, LLM-based agents. We study collusion across varying models, network topologies, and environments. Below is a taxonomy of various collusion types Colosseum can identify:
