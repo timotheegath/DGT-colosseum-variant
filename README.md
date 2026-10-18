@@ -68,22 +68,24 @@ python experiments/agent_misalignment/run.py \
 
 ## Providers
 
-Supported providers (Terrarium backends): `openai`, `anthropic`, `gemini`, `together`, `fireworks`, `vllm` (local serving). A config selects one via `llm_models[].llm.provider`.
+Supported providers (Terrarium backends): `openai`, `anthropic`, `gemini`, `together`, `fireworks`, `custom-oai-compatible`, `vllm` (local serving). A config selects one via `llm_models[].llm.provider`.
 
-### OpenRouter (passthrough)
+### Any OpenAI-compatible provider
 
-OpenRouter is supported by routing through the existing `fireworks` provider slot with `base_url: https://openrouter.ai/api/v1`. The `fireworks` client is OpenAI-compatible (POSTs to `<base_url>/chat/completions` with `Authorization: Bearer <key>`), so no changes to Terrarium are required.
+The `custom-oai-compatible` provider slot in Terrarium talks to any endpoint speaking OpenAI's chat-completions API (POSTs to `<base_url>/chat/completions` with `Authorization: Bearer <key>`). 
 
-- Model names in YAML are OpenRouter model IDs, e.g. `openai/gpt-4o-mini`, `anthropic/claude-3.5-sonnet`, `google/gemini-2.0-flash-001`; they are passed verbatim in the request body.
-- Your `.env` must set `OPENROUTER_API_KEY=<key>` **and** `FIREWORKS_API_KEY=<same key>`: the `fireworks` client falls back to the `FIREWORKS_API_KEY` env var when no `api_key` is given in the config.
-- Why this design: it keeps the change zero-edits to terrarium. Note that `provider` recorded in `run_config.json` will be `fireworks` (the underlying transport), while `model` will be the OpenRouter model ID.
+- Required env vars: `OAI_COMPATIBLE_BASE_URL` (e.g. `https://openrouter.ai/api/v1`) and `OAI_COMPATIBLE_PROVIDER_KEY` (the API key for that endpoint). See `.env.example`.
+- Model names in YAML are whatever id that endpoint expects, and are passed verbatim in the request body. OpenRouter, for example, uses ids like `openai/gpt-4o-mini` or `anthropic/claude-3.5-sonnet`.
+- Optional: per-config overrides via a `custom_oai_compatible: { base_url, api_key }` block in the YAML.
+- Judges (where used by the experiment) can also be routed through this provider via the optional `judge_llm:` block in the config. See the smoke configs for examples.
 - Ready-to-use smoke configs:
   - `experiments/collusion/configs/collusion_jira_openrouter_smoke.yaml`
   - `experiments/network_influence/configs/misinformation_prop_openrouter_smoke.yaml`
   - `experiments/agent_misalignment/configs/agent_misalignment_openrouter_smoke.yaml`
   - `experiments/persuasion/collusion/configs/persuasion_collusion_jira_openrouter_smoke.yaml`
   - `experiments/persuasion/hospital/configs/persuasion_hospital_openrouter_smoke.yaml`
-- Judges (where used by the experiment) can also be routed through OpenRouter via an optional `judge_llm:` block in the config. See the smoke configs for examples.
+
+The provider is implemented as a runtime monkey-patch in `experiments/common/_patch_terrarium.py` so no terrarium fork or post-install patching is needed; the patch activates automatically when any runner or judge is imported.
 
 ## Citation
 Please cite us using:
