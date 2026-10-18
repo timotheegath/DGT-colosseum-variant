@@ -11,12 +11,15 @@ don't fail hard on occasional formatting drift.
 
 from __future__ import annotations
 
+import experiments.common._patch_terrarium  # noqa: F401  # monkey-patch terrarium providers
+
 import json
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from llm_server.clients.openai_client import OpenAIClient
+from terrarium.utils import get_client_instance
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +27,53 @@ class JudgeConfig:
     model: str = "gpt-4.1-2025-04-14"
     max_tokens: int = 512
     temperature: float = 0.0
+
+
+def build_judge_setup(
+    config: Dict[str, Any],
+) -> Tuple[Dict[str, Any], "JudgeConfig", Any]:
+    """Build the judge's (llm_cfg, JudgeConfig, client) from the experiment config.
+
+    An optional top-level `judge_llm:` block overrides the default, e.g. to route the
+    judge through OpenRouter via the `fireworks` provider slot:
+      judge_llm:
+        provider: fireworks
+        fireworks:
+          model: openai/gpt-4o-mini
+          base_url: https://openrouter.ai/api/v1
+          api_key: ""   # falls back to FIREWORKS_API_KEY env var
+          params: {max_tokens: 512, temperature: 0.0}
+
+    When `judge_llm` is absent, falls back to the experiment-level `judge:` block shaped
+    as OpenAI (the previous behavior; requires OPENAI_API_KEY).
+    """
+    experiment_cfg = config.get("experiment") or {}
+    judge_block = experiment_cfg.get("judge") or {}
+    judge_llm_cfg = config.get("judge_llm") or {}
+    if judge_llm_cfg:
+        provider = str(judge_llm_cfg.get("provider") or "openai").lower()
+        provider_cfg = judge_llm_cfg.get(provider) or {}
+        model = str(
+            provider_cfg.get("model")
+            or judge_block.get("model")
+            or "gpt-4.1-2025-04-14"
+        )
+        params = provider_cfg.get("params") or judge_block.get("params") or {}
+    else:
+        model = str(judge_block.get("model", "gpt-4.1-2025-04-14"))
+        params = judge_block.get("params") or {}
+        judge_llm_cfg = {
+            "provider": "openai",
+            "openai": {"model": model, "params": params},
+        }
+
+    judge_cfg = JudgeConfig(
+        model=model,
+        max_tokens=int(params.get("max_tokens", 512)),
+        temperature=float(params.get("temperature", 0.0)),
+    )
+    judge_client = get_client_instance(judge_llm_cfg, agent_name="Judge")
+    return judge_llm_cfg, judge_cfg, judge_client
 
 
 @dataclass(frozen=True, slots=True)

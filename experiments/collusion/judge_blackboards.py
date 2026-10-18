@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import experiments.common._patch_terrarium  # noqa: F401  # monkey-patch terrarium providers
+
 import argparse
 import asyncio
 import csv
@@ -11,12 +13,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+import yaml
 from tqdm import tqdm
+
+from terrarium.utils import get_client_instance
 
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
-
-from llm_server.clients.openai_client import OpenAIClient
 
 
 @dataclass(frozen=True)
@@ -210,7 +213,9 @@ def _load_blackboards(run_dir: Path) -> List[Dict[str, Any]]:
     return blackboards
 
 
-def _find_blackboard(blackboards: List[Dict[str, Any]], blackboard_id: int) -> Dict[str, Any]:
+def _find_blackboard(
+    blackboards: List[Dict[str, Any]], blackboard_id: int
+) -> Dict[str, Any]:
     target_id = str(int(blackboard_id))
     for entry in blackboards:
         if str(entry.get("blackboard_id") or "") == target_id:
@@ -262,10 +267,7 @@ def _zero_judge_result(*, rationale: str) -> JudgeResult:
 
 def _zero_judgements(*, rationale: str) -> Dict[str, Dict[str, Any]]:
     zero = _zero_judge_result(rationale=rationale)
-    return {
-        p.name: asdict(zero)
-        for p in JUDGE_PROMPTS
-    }
+    return {p.name: asdict(zero) for p in JUDGE_PROMPTS}
 
 
 def _blackboard_id(entry: Dict[str, Any]) -> str:
@@ -305,6 +307,7 @@ def _judge_once(
     judge_cfg: JudgeConfig,
     prompt: JudgePrompt,
     transcript: str,
+    judge_llm_cfg: Optional[Dict[str, Any]] = None,
 ) -> JudgeResult:
     system = (
         "You are an impartial evaluator.\n"
@@ -332,7 +335,10 @@ def _judge_once(
         "tools": [],
     }
 
-    client = OpenAIClient()
+    # Optional `judge_llm` config (e.g. fireworks/OpenRouter passthrough) overrides the
+    # OpenAI default; both paths go through get_client_instance.
+    llm_cfg = judge_llm_cfg or {"provider": "openai", "openai": {}}
+    client = get_client_instance(llm_cfg, agent_name="Judge")
     context = client.init_context(system, user)
     _, response_text = client.generate_response(input=context, params=params)
 
@@ -367,6 +373,7 @@ async def _judge_with_retries(
     prompt: JudgePrompt,
     transcript: str,
     max_retries: int,
+    judge_llm_cfg: Optional[Dict[str, Any]] = None,
 ) -> JudgeResult:
     last_exc: Optional[BaseException] = None
     for attempt in range(max(0, int(max_retries)) + 1):
@@ -376,6 +383,7 @@ async def _judge_with_retries(
                 judge_cfg=judge_cfg,
                 prompt=prompt,
                 transcript=transcript,
+                judge_llm_cfg=judge_llm_cfg,
             )
         except Exception as exc:
             last_exc = exc
@@ -449,6 +457,7 @@ async def _evaluate_run(
     baseline_all_blackboards: bool,
     semaphore: asyncio.Semaphore,
     max_retries: int,
+    judge_llm_cfg: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
     out_file = _result_file_for_run(run_dir)
 
@@ -489,8 +498,8 @@ async def _evaluate_run(
             for entry in blackboards:
                 total += 1
                 bb_id = _blackboard_id(entry)
-                transcript_bb, participants, has_msgs = _format_blackboard_entry_transcript(
-                    entry
+                transcript_bb, participants, has_msgs = (
+                    _format_blackboard_entry_transcript(entry)
                 )
                 bb_payload: Dict[str, Any] = {
                     "participants": participants,
@@ -515,6 +524,7 @@ async def _evaluate_run(
                         prompt=p,
                         transcript=transcript_bb,
                         max_retries=max_retries,
+                        judge_llm_cfg=judge_llm_cfg,
                     )
                     ratings_by_prompt[p.name].append(float(result.rating))
                     bb_payload["judgements"][p.name] = asdict(result)
@@ -606,7 +616,9 @@ async def _evaluate_run(
     except KeyError as exc:
         raise KeyError(f"{run_dir.name}: secret blackboard not found ({exc})") from exc
 
-    transcript, participants, has_msgs = _format_blackboard_entry_transcript(secret_entry)
+    transcript, participants, has_msgs = _format_blackboard_entry_transcript(
+        secret_entry
+    )
     if not has_msgs:
         payload = _base_payload(
             run_dir=run_dir,
@@ -635,6 +647,7 @@ async def _evaluate_run(
                 prompt=p,
                 transcript=transcript,
                 max_retries=max_retries,
+                judge_llm_cfg=judge_llm_cfg,
             )
             judgements[p.name] = asdict(result)
 
@@ -738,6 +751,7 @@ async def evaluate_root(
     dry_run: bool,
     max_retries: int,
     baseline_all_blackboards: bool,
+    judge_llm_cfg: Optional[Dict[str, Any]] = None,
 ) -> None:
     run_dirs = list(_iter_run_dirs(root))
     if not run_dirs:
@@ -783,6 +797,7 @@ async def evaluate_root(
                 baseline_all_blackboards=bool(baseline_all_blackboards),
                 semaphore=semaphore,
                 max_retries=max(0, int(max_retries)),
+                judge_llm_cfg=judge_llm_cfg,
             ),
             name=str(run_dir),
         )
@@ -829,6 +844,7 @@ async def evaluate_sweep_dir(
     dry_run: bool,
     max_retries: int,
     baseline_all_blackboards: bool,
+    judge_llm_cfg: Optional[Dict[str, Any]] = None,
 ) -> None:
     run_dirs = list(_iter_run_dirs_in_sweep(sweep_dir))
     if not run_dirs:
@@ -872,6 +888,7 @@ async def evaluate_sweep_dir(
                 baseline_all_blackboards=bool(baseline_all_blackboards),
                 semaphore=semaphore,
                 max_retries=max(0, int(max_retries)),
+                judge_llm_cfg=judge_llm_cfg,
             ),
             name=str(run_dir),
         )
@@ -926,6 +943,13 @@ def main() -> None:
         help="OpenAI judge model (default: gpt-4o-mini).",
     )
     parser.add_argument(
+        "--config",
+        help="Optional experiment YAML config. If it contains a top-level `judge_llm:` block, "
+        "the judge is routed through that provider (e.g. fireworks/OpenRouter passthrough) "
+        "instead of the OpenAI default; the block's model/params then override "
+        "--judge-model/--max-output-tokens/--temperature.",
+    )
+    parser.add_argument(
         "--max-output-tokens", type=int, default=256, help="Judge max output tokens."
     )
     parser.add_argument(
@@ -970,10 +994,34 @@ def main() -> None:
 
     root = Path(args.root).expanduser().resolve() if args.root else None
     sweep_dir = Path(args.sweep_dir).expanduser().resolve() if args.sweep_dir else None
+
+    judge_llm_cfg: Optional[Dict[str, Any]] = None
+    judge_model = str(args.judge_model)
+    judge_max_output_tokens = int(args.max_output_tokens)
+    judge_temperature = float(args.temperature)
+    if args.config:
+        try:
+            with open(args.config, "r", encoding="utf-8") as f:
+                config_data = yaml.safe_load(f) or {}
+        except Exception as exc:
+            raise SystemExit(f"Failed to load --config {args.config}: {exc}") from exc
+        judge_llm_cfg = (config_data or {}).get("judge_llm") or None
+        if judge_llm_cfg:
+            provider = str(judge_llm_cfg.get("provider") or "openai").lower()
+            provider_cfg = judge_llm_cfg.get(provider) or {}
+            judge_model = str(provider_cfg.get("model") or judge_model)
+            provider_params = provider_cfg.get("params") or {}
+            judge_max_output_tokens = int(
+                provider_params.get("max_tokens", judge_max_output_tokens)
+            )
+            judge_temperature = float(
+                provider_params.get("temperature", judge_temperature)
+            )
+
     judge_cfg = JudgeConfig(
-        model=str(args.judge_model),
-        max_output_tokens=int(args.max_output_tokens),
-        temperature=float(args.temperature),
+        model=judge_model,
+        max_output_tokens=judge_max_output_tokens,
+        temperature=judge_temperature,
     )
 
     if sweep_dir is not None:
@@ -986,6 +1034,7 @@ def main() -> None:
                 dry_run=bool(args.dry_run),
                 max_retries=int(args.max_retries),
                 baseline_all_blackboards=bool(args.baseline_all_blackboards),
+                judge_llm_cfg=judge_llm_cfg,
             )
         )
         return
@@ -1002,6 +1051,7 @@ def main() -> None:
             dry_run=bool(args.dry_run),
             max_retries=int(args.max_retries),
             baseline_all_blackboards=bool(args.baseline_all_blackboards),
+            judge_llm_cfg=judge_llm_cfg,
         )
     )
 
