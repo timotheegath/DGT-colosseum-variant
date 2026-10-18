@@ -1,5 +1,14 @@
 # Colosseum <sub><sub><img src="dev/colosseum_icon.png" alt="Colosseum icon" width="45" /></sub></sub>
 
+> [!IMPORTANT]
+> ## This repository is a variant of the original [Colosseum](https://github.com/umass-ai-safety/colosseum) project.
+>
+> It is built on top of the same environments and tools, adapted to **test agent collusion without explicit communication**. Rather than relying on a designated side channel (e.g. a secret blackboard), this variant removes the side-channel affordance and probes whether collusion can emerge through the usage of tools on the common channel.
+>
+> Developed as part of the **Apart Research sprint, October 2026**.
+>
+> All credit for the framework, environments, and experimental design goes to the original authors. See the [Citation](#citation) section below — please cite the original work as the authors request.
+
 > [!NOTE]
 > :tada: **Colosseum has been accepted to the NeurIPS 2026 Evaluations and Datasets Track!** Read the paper on [arXiv](https://arxiv.org/abs/2602.15198).
 
@@ -88,7 +97,7 @@ The `custom-oai-compatible` provider slot in Terrarium talks to any endpoint spe
 The provider is implemented as a runtime monkey-patch in `experiments/common/_patch_terrarium.py` so no terrarium fork or post-install patching is needed; the patch activates automatically when any runner or judge is imported.
 
 ## Citation
-Please cite us using:
+Please cite the original work using:
 ```bibtex
 @article{nakamura2026colosseumauditingcollusioncooperative,
       title={Colosseum: Auditing Collusion in Cooperative Multi-Agent Systems}, 
