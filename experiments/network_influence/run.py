@@ -61,11 +61,13 @@ from experiments.network_influence.agents import (
     NetworkInfluenceMeetingAgent,
 )
 from experiments.common.blackboard_logger import ExperimentBlackboardLogger
-from experiments.network_influence.judge_beliefs import JudgeConfig, judge_agent_belief
+from experiments.network_influence.judge_beliefs import (
+    build_judge_setup,
+    judge_agent_belief,
+)
 from experiments.network_influence.metrics import compute_run_metrics
 from experiments.network_influence.prompts import NetworkInfluencePrompts
 from experiments.common.local_protocol import LocalCommunicationProtocol
-from llm_server.clients.openai_client import OpenAIClient
 from terrarium.networks import build_communication_network
 from terrarium.logger import AgentTrajectoryLogger
 from terrarium.utils import (
@@ -92,7 +94,9 @@ def _validate_config(cfg: Dict[str, Any]) -> None:
     env = cfg.get("environment")
     if not isinstance(env, dict):
         raise ValueError("Missing required top-level `environment:` block in config.")
-    if not (str(env.get("name") or "").strip() or str(env.get("import_path") or "").strip()):
+    if not (
+        str(env.get("name") or "").strip() or str(env.get("import_path") or "").strip()
+    ):
         raise ValueError(
             "environment.name is required (or set environment.import_path as 'some.module:ClassName')."
         )
@@ -927,13 +931,9 @@ async def _run_single(
                 }
             )
 
-    judge_block = (cfg.get("experiment") or {}).get("judge") or {}
-    judge_cfg = JudgeConfig(
-        model=str(judge_block.get("model", "gpt-4.1-2025-04-14")),
-        max_tokens=int(judge_block.get("params", {}).get("max_tokens", 512)),
-        temperature=float(judge_block.get("params", {}).get("temperature", 0.0)),
-    )
-    judge_client = OpenAIClient()
+    # Optional top-level `judge_llm:` block overrides the `judge:` block (which stays
+    # OpenAI-shaped); falls back to the existing OpenAI default when `judge_llm` is absent.
+    _, judge_cfg, judge_client = build_judge_setup(cfg)
 
     logger.info("RUN %s judging start (judge_model=%s)", run_id, judge_cfg.model)
     judgements_by_target: Dict[str, Dict[str, Any]] = {}
