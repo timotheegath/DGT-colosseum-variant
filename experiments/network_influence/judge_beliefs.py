@@ -11,6 +11,8 @@ don't fail hard on occasional formatting drift.
 
 from __future__ import annotations
 
+import experiments.common._patch_terrarium  # noqa: F401  # monkey-patch terrarium providers
+
 import json
 import re
 from dataclasses import dataclass
