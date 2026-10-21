@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import experiments.common._patch_terrarium  # noqa: F401  # monkey-patch terrarium providers
+from experiments.common._patch_terrarium import normalize_provider_name
 
 import json
 import logging
@@ -181,7 +182,7 @@ async def judge_run(run_dir: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     judge_llm_cfg = config.get("judge_llm") or experiment_cfg.get("judge_llm")
     if judge_llm_cfg:
         llm_cfg = judge_llm_cfg
-        provider = str(llm_cfg.get("provider") or "openai").lower()
+        provider = normalize_provider_name(llm_cfg.get("provider") or "openai")
         provider_cfg = llm_cfg.get(provider) or {}
         model_name = provider_cfg.get("model") or eval_model
         params = provider_cfg.get("params") or eval_params

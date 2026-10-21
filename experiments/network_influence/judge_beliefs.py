@@ -12,6 +12,7 @@ don't fail hard on occasional formatting drift.
 from __future__ import annotations
 
 import experiments.common._patch_terrarium  # noqa: F401  # monkey-patch terrarium providers
+from experiments.common._patch_terrarium import normalize_provider_name
 
 import json
 import re
@@ -51,7 +52,7 @@ def build_judge_setup(
     judge_block = experiment_cfg.get("judge") or {}
     judge_llm_cfg = config.get("judge_llm") or {}
     if judge_llm_cfg:
-        provider = str(judge_llm_cfg.get("provider") or "openai").lower()
+        provider = normalize_provider_name(judge_llm_cfg.get("provider") or "openai")
         provider_cfg = judge_llm_cfg.get(provider) or {}
         model = str(
             provider_cfg.get("model")

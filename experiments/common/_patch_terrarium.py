@@ -1,18 +1,30 @@
-"""Runtime monkey-patch that teaches terrarium about the ``custom-oai-compatible`` provider.
+"""Runtime monkey-patch that teaches terrarium about the ``custom_oai_compatible`` provider.
 
-This module is colosseum's own implementation of the ``custom-oai-compatible``
+This module is colosseum's own implementation of the ``custom_oai_compatible``
 LLM provider slot. It exists because the upstream ``terrarium-agents`` package
 ships a fixed provider list (``openai, anthropic, gemini, together, fireworks,
 vllm``) and the provider slot we need is not part of it.
 
+The snake_case spelling ``custom_oai_compatible`` is the ONLY accepted provider
+string. The hyphenated spelling ``custom-oai-compatible`` used to be accepted too,
+but it silently dropped the provider's ``params``: terrarium keys its lookups on
+``llm_config.get(provider.lower())`` (see ``terrarium.utils.get_generation_params``),
+so ``provider: custom-oai-compatible`` looked up the nonexistent
+``custom-oai-compatible`` YAML block and returned ``{}``. The hyphenated spelling
+now raises a clear :class:`ValueError` (via :func:`normalize_provider_name`) rather
+than failing silently.
+
 Rather than fork terrarium — or edit files inside ``.venv/`` (which are wiped by
-``uv sync`` and absent on a fresh checkout) — we patch the two dispatch
-functions at runtime, from a file that *is* committed to this repo:
+``uv sync`` and absent on a fresh checkout) — we patch the dispatch functions at
+runtime, from a file that *is* committed to this repo:
 
 * ``terrarium.utils.get_client_instance`` — returns a
-  :class:`CustomOAICompatibleClient` for ``custom-oai-compatible`` /
-  ``custom_oai_compatible`` and delegates everything else to the original.
+  :class:`CustomOAICompatibleClient` for ``custom_oai_compatible`` and delegates
+  everything else to the original.
 * ``terrarium.utils.get_model_name`` — same treatment for model-name lookup.
+* ``terrarium.utils.get_generation_params`` — resolves the ``custom_oai_compatible``
+  ``params`` block for this provider (defense in depth; the upstream implementation
+  would otherwise return ``{}`` for any non-snake_case alias).
 
 Importing this module applies the patch (idempotently). Every runner imports
 ``experiments.common.run_utils`` early, which in turn imports this module, so
@@ -39,8 +51,34 @@ from dotenv import load_dotenv
 from llm_server.clients.abstract_client import AbstractClient
 from llm_server.clients.fireworks_client import _convert_tools
 
-# Both spellings are accepted, matching the rest of the repo's config surface.
-_CUSTOM_PROVIDER_ALIASES = ("custom-oai-compatible", "custom_oai_compatible")
+# ``custom_oai_compatible`` (snake_case) is the only accepted spelling. The tuple
+# form is kept for call-site readability, but it now holds exactly one canonical
+# entry; the hyphenated spelling is rejected by ``normalize_provider_name`` below.
+_CUSTOM_PROVIDER_ALIASES = ("custom_oai_compatible",)
+
+# The legacy hyphenated spelling, kept only so we can detect and reject it loudly.
+_HYPHENATED_CUSTOM_PROVIDER = "custom-oai-compatible"
+
+
+def normalize_provider_name(provider: Any) -> str:
+    """Normalize (and validate) a provider string.
+
+    Returns the lowercased/stripped provider name. Raises :class:`ValueError` for
+    the legacy hyphenated ``custom-oai-compatible`` spelling, which terrarium keys
+    its config lookups on verbatim and therefore resolves to an empty ``params``
+    dict (a silent failure). Any other provider string is returned unchanged
+    (modulo case-folding / surrounding whitespace).
+    """
+    normalized = str(provider).strip().lower()
+    if normalized == _HYPHENATED_CUSTOM_PROVIDER:
+        raise ValueError(
+            "provider 'custom-oai-compatible' is no longer supported: terrarium looks "
+            "up its per-provider config block using the provider string verbatim, so the "
+            "hyphenated spelling silently drops `params` (max_tokens, temperature, ...). "
+            "Use the snake_case spelling instead:\n"
+            "    provider: custom_oai_compatible"
+        )
+    return normalized
 
 
 class CustomOAICompatibleClient(AbstractClient):
@@ -242,21 +280,28 @@ class CustomOAICompatibleClient(AbstractClient):
 
 
 def apply() -> None:
-    """Install the `custom-oai-compatible` provider into terrarium's dispatch.
+    """Install the `custom_oai_compatible` provider into terrarium's dispatch.
 
-    Idempotent: repeated calls (or repeated imports) are a no-op.
+    Idempotent: repeated calls (or repeated imports) are a no-op. Each patch is
+    guarded independently so a partially-applied state still converges.
     """
     import terrarium
     import terrarium.utils as _tu
 
-    if getattr(_tu.get_client_instance, "_colosseum_patched", False):
-        return
+    if not getattr(_tu.get_client_instance, "_colosseum_patched", False):
+        _install_client_and_model_patch(terrarium, _tu)
 
+    if not getattr(_tu.get_generation_params, "_colosseum_patched", False):
+        _install_generation_params_patch(_tu)
+
+
+def _install_client_and_model_patch(terrarium: Any, _tu: Any) -> None:
+    """Patch ``get_client_instance`` / ``get_model_name`` (idempotently)."""
     _orig_get_client = _tu.get_client_instance
     _orig_get_model = _tu.get_model_name
 
     def get_client_instance(llm_config, *, agent_name=None, vllm_runtime=None):
-        provider = (llm_config.get("provider") or "vllm").lower()
+        provider = normalize_provider_name(llm_config.get("provider") or "vllm")
         if provider in _CUSTOM_PROVIDER_ALIASES:
             coai_cfg = llm_config.get("custom_oai_compatible") or {}
             return CustomOAICompatibleClient(
@@ -269,7 +314,10 @@ def apply() -> None:
         )
 
     def get_model_name(provider, llm_config):
-        if isinstance(provider, str) and provider.lower() in _CUSTOM_PROVIDER_ALIASES:
+        normalized = (
+            normalize_provider_name(provider) if isinstance(provider, str) else ""
+        )
+        if normalized in _CUSTOM_PROVIDER_ALIASES:
             return llm_config.get("custom_oai_compatible", {}).get(
                 "model", "unknown-custom-oai-compatible-model"
             )
@@ -286,6 +334,38 @@ def apply() -> None:
         terrarium.get_client_instance = get_client_instance
     if getattr(terrarium, "get_model_name", None) is _orig_get_model:
         terrarium.get_model_name = get_model_name
+
+
+def _install_generation_params_patch(_tu: Any) -> None:
+    """Patch ``get_generation_params`` so it resolves our provider's params block.
+
+    Upstream keys the per-provider block on the provider string verbatim, which
+    already works for the canonical ``custom_oai_compatible`` spelling; this patch
+    is defense in depth and makes the rejection of the hyphenated spelling happen
+    in one place (:func:`normalize_provider_name`). All other providers are
+    delegated to the original implementation unchanged.
+    """
+    _orig_get_generation_params = _tu.get_generation_params
+
+    def get_generation_params(llm_config: Dict[str, Any]) -> Dict[str, Any]:
+        raw_provider = llm_config.get("provider")
+        provider = normalize_provider_name(raw_provider) if raw_provider else ""
+        if provider not in _CUSTOM_PROVIDER_ALIASES:
+            return _orig_get_generation_params(llm_config)
+
+        provider_block = llm_config.get("custom_oai_compatible", {})
+        if not isinstance(provider_block, dict):
+            return {}
+        raw_params = (
+            provider_block.get("params") or provider_block.get("generation") or {}
+        )
+        if not isinstance(raw_params, dict):
+            return {}
+        # Never leak model identifiers into request params (matches upstream).
+        return {k: v for k, v in raw_params.items() if k != "model"}
+
+    get_generation_params._colosseum_patched = True  # type: ignore[attr-defined]
+    _tu.get_generation_params = get_generation_params
 
 
 # Applying on import means a bare `import experiments.common._patch_terrarium`

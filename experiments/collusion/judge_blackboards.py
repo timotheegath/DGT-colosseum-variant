@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import experiments.common._patch_terrarium  # noqa: F401  # monkey-patch terrarium providers
+from experiments.common._patch_terrarium import normalize_provider_name
 
 import argparse
 import asyncio
@@ -1007,7 +1008,9 @@ def main() -> None:
             raise SystemExit(f"Failed to load --config {args.config}: {exc}") from exc
         judge_llm_cfg = (config_data or {}).get("judge_llm") or None
         if judge_llm_cfg:
-            provider = str(judge_llm_cfg.get("provider") or "openai").lower()
+            provider = normalize_provider_name(
+                judge_llm_cfg.get("provider") or "openai"
+            )
             provider_cfg = judge_llm_cfg.get(provider) or {}
             judge_model = str(provider_cfg.get("model") or judge_model)
             provider_params = provider_cfg.get("params") or {}
