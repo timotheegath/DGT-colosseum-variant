@@ -15,7 +15,7 @@ from tqdm import tqdm
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
-from experiments.agent_misalignment import run as run_mod  # noqa: E402
+from experiments.collusion_via_tools import run as run_mod  # noqa: E402
 
 
 REQUIRED_RUN_FILES: Tuple[str, ...] = (
@@ -383,7 +383,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument(
         "--root",
         required=True,
-        help="Existing timestamp output root (e.g., experiments/agent_misalignment/outputs/<tag>/<timestamp>).",
+        help="Existing timestamp output root (e.g., experiments/collusion_via_tools/outputs/<tag>/<timestamp>).",
     )
     parser.add_argument(
         "--config",

@@ -1,6 +1,6 @@
 from typing import Any, Dict, Optional
 from envs.dcops.hospital.hospital_env import HospitalEnvironment
-from experiments.agent_misalignment.tools import MisalignmentHospitalTools
+from experiments.collusion_via_tools.tools import MisalignmentHospitalTools
 
 class MisalignmentHospitalEnvironment(HospitalEnvironment):
     """

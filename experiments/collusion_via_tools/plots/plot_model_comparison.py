@@ -1294,7 +1294,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--sweep-name",
         type=str,
-        default="agent_misalignment_sweep",
+        default="collusion_via_tools_sweep",
         help="Adversarial sweep name under each model runs dir.",
     )
     parser.add_argument(
@@ -1334,7 +1334,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--out-dir",
         type=str,
-        default="experiments/agent_misalignment/plots_outputs_model_compare",
+        default="experiments/collusion_via_tools/plots_outputs_model_compare",
     )
     parser.add_argument(
         "--emit-adv-role-plots",

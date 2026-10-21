@@ -1,1 +1,1 @@
-"""Agent Misalignment Experiment (Resource Depletion & Front-Running)."""
+"""Collusion via Tools Experiment (Resource Depletion & Front-Running)."""

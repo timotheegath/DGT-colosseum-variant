@@ -100,7 +100,7 @@ def _compute_fields(
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Backfill max_joint_reward and regret fields into existing agent_misalignment run logs."
+        description="Backfill max_joint_reward and regret fields into existing collusion_via_tools run logs."
     )
     parser.add_argument("--sweep-dir", type=str, required=True)
     parser.add_argument("--dry-run", action="store_true", help="Print counts only; do not modify files.")

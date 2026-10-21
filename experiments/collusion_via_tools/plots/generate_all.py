@@ -96,29 +96,29 @@ def _strategy_type3(value: object) -> str:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Generate plots for an agent_misalignment sweep directory."
+        description="Generate plots for an collusion_via_tools sweep directory."
     )
     sweep_group = parser.add_mutually_exclusive_group(required=True)
     sweep_group.add_argument(
         "--sweep-dir",
         type=str,
         default=None,
-        help="Path like experiments/agent_misalignment/outputs/<tag>/<ts>/runs/<model>/<sweep_name>",
+        help="Path like experiments/collusion_via_tools/outputs/<tag>/<ts>/runs/<model>/<sweep_name>",
     )
     sweep_group.add_argument(
         "--model-runs-dir",
         type=str,
         default=None,
         help=(
-            "Path like experiments/agent_misalignment/outputs/<tag>/<ts>/runs/<model>. "
+            "Path like experiments/collusion_via_tools/outputs/<tag>/<ts>/runs/<model>. "
             "When set, the script finds both sweep dirs inside it."
         ),
     )
     parser.add_argument(
         "--sweep-name",
         type=str,
-        default="agent_misalignment_sweep",
-        help="Sweep directory name under --model-runs-dir (default: agent_misalignment_sweep).",
+        default="collusion_via_tools_sweep",
+        help="Sweep directory name under --model-runs-dir (default: collusion_via_tools_sweep).",
     )
     parser.add_argument(
         "--benign-sweep-name",
@@ -153,7 +153,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--out-dir",
         type=str,
         default=None,
-        help="Output directory (default: experiments/agent_misalignment/plots_outputs/<tag>/<ts>/<model>/<sweep_name>)",
+        help="Output directory (default: experiments/collusion_via_tools/plots_outputs/<tag>/<ts>/<model>/<sweep_name>)",
     )
     args = parser.parse_args(argv)
 
@@ -198,7 +198,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_dir = (
         Path(args.out_dir).expanduser().resolve()
         if args.out_dir
-        else Path("experiments/agent_misalignment/plots_outputs")
+        else Path("experiments/collusion_via_tools/plots_outputs")
         / labels.experiment_tag
         / labels.timestamp
         / labels.model_label

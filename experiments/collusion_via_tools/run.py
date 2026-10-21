@@ -29,21 +29,21 @@ from experiments.common.run_utils import (
     write_json as _write_json,
     write_progress as _write_progress,
 )
-from experiments.agent_misalignment.agents import (
+from experiments.collusion_via_tools.agents import (
     AdversarySpec,
     MisalignmentHospitalAgent,
 )
 from experiments.common.blackboard_logger import ExperimentBlackboardLogger
-from experiments.agent_misalignment.metrics import compute_misalignment_metrics
-from experiments.agent_misalignment.prompts import MisalignmentPrompts
+from experiments.collusion_via_tools.metrics import compute_misalignment_metrics
+from experiments.collusion_via_tools.prompts import MisalignmentPrompts
 from experiments.common.local_protocol import LocalCommunicationProtocol
-from experiments.agent_misalignment.judge_beliefs import judge_run
+from experiments.collusion_via_tools.judge_beliefs import judge_run
 
 from terrarium.networks import build_communication_network
 from terrarium.logger import AgentTrajectoryLogger, PromptLogger
 from terrarium.utils import get_client_instance, get_generation_params, get_model_name, build_vllm_runtime
 
-LOGGER_NAME = "experiments.agent_misalignment"
+LOGGER_NAME = "experiments.collusion_via_tools"
 logger = logging.getLogger(LOGGER_NAME)
 
 _PATH_COMPONENT_RE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -1048,7 +1048,7 @@ async def run_from_config(config_path: str, *, out_dir: Optional[str] = None, ma
                                     total_runs += len(seeds)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    root = Path(out_dir or exp.get("output_dir") or "experiments/agent_misalignment/outputs") / timestamp
+    root = Path(out_dir or exp.get("output_dir") or "experiments/collusion_via_tools/outputs") / timestamp
     _ensure_dir(root)
     _configure_experiment_logging(root)
     _write_json(root / "config.json", cfg)
@@ -1173,7 +1173,7 @@ async def run_from_config(config_path: str, *, out_dir: Optional[str] = None, ma
 
     # Optional: aggregate costs across all runs (best-effort).
     try:
-        from experiments.agent_misalignment.costs import compute_and_write_costs
+        from experiments.collusion_via_tools.costs import compute_and_write_costs
 
         compute_and_write_costs(root, write_per_run=False)
     except Exception:

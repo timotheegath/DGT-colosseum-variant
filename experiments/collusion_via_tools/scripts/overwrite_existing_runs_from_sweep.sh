@@ -12,12 +12,12 @@ Usage:
 
 Example (your case):
   overwrite_existing_runs_from_sweep.sh --dry-run \
-    "Terrarium/experiments/agent_misalignment/outputs/agent_misalignment/20260123-235332 copy" \
-    "Terrarium/experiments/agent_misalignment/outputs/agent_misalignment/20260125-123556"
+    "Terrarium/experiments/collusion_via_tools/outputs/collusion_via_tools/20260123-235332 copy" \
+    "Terrarium/experiments/collusion_via_tools/outputs/collusion_via_tools/20260125-123556"
 
   overwrite_existing_runs_from_sweep.sh \
-    "Terrarium/experiments/agent_misalignment/outputs/agent_misalignment/20260123-235332 copy" \
-    "Terrarium/experiments/agent_misalignment/outputs/agent_misalignment/20260125-123556"
+    "Terrarium/experiments/collusion_via_tools/outputs/collusion_via_tools/20260123-235332 copy" \
+    "Terrarium/experiments/collusion_via_tools/outputs/collusion_via_tools/20260125-123556"
 EOF
 }
 
