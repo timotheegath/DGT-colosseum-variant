@@ -3,12 +3,12 @@
 This guide shows how to run colosseum experiments — including their LLM-judges —
 against any endpoint that speaks the OpenAI chat-completions API
 ([OpenRouter](https://openrouter.ai), self-hosted vLLM with an OpenAI shim,
-OpenAI-compatible proxies, etc.) using the `custom-oai-compatible` provider slot.
+OpenAI-compatible proxies, etc.) using the `custom_oai_compatible` provider slot.
 
 It assumes you have:
 
-- a working colosseum checkout on branch `feature/openrouter-support`,
-- a Python 3.11 virtualenv at `.venv/` (see repo `AGENTS.md`).
+- a working colosseum checkout on `main`,
+- a Python 3.11+ virtualenv at `.venv/` (the shipped venv is 3.12 — see repo `AGENTS.md`).
 
 No terrarium fork or post-install patching is required: the provider is
 implemented as a runtime monkey-patch in `experiments/common/_patch_terrarium.py`
@@ -53,7 +53,7 @@ A minimal agent block looks like this:
 llm_models:
   - label: openrouter-gpt-4o-mini
     llm:
-      provider: custom-oai-compatible
+      provider: custom_oai_compatible
       custom_oai_compatible:
         model: openai/gpt-4o-mini      # whatever id your endpoint expects
         params:
@@ -63,9 +63,12 @@ llm_models:
 
 Things to notice:
 
-- The block name under `llm:` is `custom_oai_compatible` (snake-case).
-- The `provider:` string is `custom-oai-compatible` (hyphenated) — both forms
-  are accepted by terrarium's dispatch.
+- The block name under `llm:` **and** the `provider:` string are both
+  `custom_oai_compatible` (snake_case). They must match: terrarium looks up the
+  params block by the provider string verbatim.
+- The hyphenated `custom-oai-compatible` is **not** accepted as a `provider:`
+  value and raises a `ValueError` at config-load time (it used to be accepted and
+  silently dropped your `params`).
 - `base_url` and `api_key` are deliberately **absent**. They come from the env
   vars in §1, so the same YAML works against any endpoint.
 - `model` must be present in the YAML — it's not configurable via env vars
@@ -73,7 +76,7 @@ Things to notice:
 - `params` are passed straight to the chat-completions request body
   (`temperature`, `max_tokens`, `top_p`, etc.).
 
-Five ready-to-use smoke configs ship with this branch:
+Five ready-to-use smoke configs ship with this repo:
 
 - `experiments/collusion/configs/collusion_jira_openrouter_smoke.yaml`
 - `experiments/network_influence/configs/misinformation_prop_openrouter_smoke.yaml`
@@ -115,7 +118,7 @@ experiment:
   ...
 
 judge_llm:
-  provider: custom-oai-compatible
+  provider: custom_oai_compatible
   custom_oai_compatible:
     model: openai/gpt-4o-mini        # judge model; cheap model is fine
     params:
@@ -137,7 +140,7 @@ previous behavior:
 So the **opt-in** model is: leave the old blocks alone, set `OPENAI_API_KEY`,
 and OpenAI judges your non-OpenAI agents. The **opt-out** model is: add a
 `judge_llm:` block, drop `OPENAI_API_KEY` from `.env`, and the judge goes
-through the same `custom-oai-compatible` slot as the agents.
+through the same `custom_oai_compatible` slot as the agents.
 
 ### 3b. Standalone judge CLI (`collusion`, `persuasion/collusion`)
 
@@ -208,13 +211,13 @@ works on OpenRouter.
 
 | Layer                               | Where                                                            | Committed? |
 |-------------------------------------|------------------------------------------------------------------|------------|
-| Smoke configs + README + .env.example | The repo, on `feature/openrouter-support`                       | yes        |
+| Smoke configs + README + .env.example | The repo, on `main`                                            | yes        |
 | `CustomOAICompatibleClient`         | `experiments/common/_patch_terrarium.py`                         | yes        |
-| `custom-oai-compatible` branches in `terrarium.utils` | `experiments/common/_patch_terrarium.py` (runtime patch) | yes        |
-| `judge_llm:` support in judges      | The repo, on `feature/openrouter-support`                        | yes        |
+| `custom_oai_compatible` branches in `terrarium.utils` | `experiments/common/_patch_terrarium.py` (runtime patch) | yes        |
+| `judge_llm:` support in judges      | The repo, on `main`                                             | yes        |
 
-Everything needed to make `provider: custom-oai-compatible` work lives in this
-repo. `experiments/common/_patch_terrarium.py` installs the `custom-oai-compatible`
+Everything needed to make `provider: custom_oai_compatible` work lives in this
+repo. `experiments/common/_patch_terrarium.py` installs the `custom_oai_compatible`
 branches into `terrarium.utils.get_client_instance` / `get_model_name` at
 runtime; it is applied automatically at import time (every runner imports it
 via `experiments/common/run_utils.py`, and the standalone judge CLIs import it
@@ -236,14 +239,15 @@ dropped in favour of the built-in provider.
 
 - **The judge uses OpenAI even though I set `judge_llm:`.**
   Check (a) the block is at the top level of the YAML, not nested under
-  `experiment:`, and (b) the `provider` value is `custom-oai-compatible`
-  (hyphenated) or `custom_oai_compatible` (snake-case) — both work, anything
-  else falls back to OpenAI.
+  `experiment:`, and (b) the `provider` value is `custom_oai_compatible`
+  (snake_case). Only snake_case is accepted — the hyphenated
+  `custom-oai-compatible` raises a `ValueError`, and anything else falls back to
+  OpenAI.
 
 - **Tool-calling fails on my self-hosted model.**
   `CustomOAICompatibleClient` uses OpenAI's `tools` / `tool_calls` shape.
   Your endpoint must support that; some older shims don't.
 
-- **`run_config.json` shows `provider: fireworks` instead of `custom-oai-compatible`.**
-  You're on an old version of the branch (pre-fix-3). Re-pull the branch; the
-  new client records the correct provider name.
+- **`run_config.json` shows `provider: fireworks` instead of `custom_oai_compatible`.**
+  You're on an old checkout (pre-fix-3). Re-pull `main`; the new client records
+  the correct provider name.

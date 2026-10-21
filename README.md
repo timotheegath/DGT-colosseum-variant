@@ -79,11 +79,11 @@ python experiments/agent_misalignment/run.py \
 
 ## Providers
 
-Supported providers (Terrarium backends): `openai`, `anthropic`, `gemini`, `together`, `fireworks`, `custom-oai-compatible`, `vllm` (local serving). A config selects one via `llm_models[].llm.provider`.
+Supported providers (Terrarium backends): `openai`, `anthropic`, `gemini`, `together`, `fireworks`, `custom_oai_compatible`, `vllm` (local serving). A config selects one via `llm_models[].llm.provider`. The `custom_oai_compatible` value is snake_case only — the hyphenated `custom-oai-compatible` raises.
 
 ### Any OpenAI-compatible provider
 
-The `custom-oai-compatible` provider slot in Terrarium talks to any endpoint speaking OpenAI's chat-completions API (POSTs to `<base_url>/chat/completions` with `Authorization: Bearer <key>`). 
+The `custom_oai_compatible` provider slot in Terrarium talks to any endpoint speaking OpenAI's chat-completions API (POSTs to `<base_url>/chat/completions` with `Authorization: Bearer <key>`). 
 
 - Required env vars: `OAI_COMPATIBLE_BASE_URL` (e.g. `https://openrouter.ai/api/v1`) and `OAI_COMPATIBLE_PROVIDER_KEY` (the API key for that endpoint). See `.env.example`.
 - Model names in YAML are whatever id that endpoint expects, and are passed verbatim in the request body. OpenRouter, for example, uses ids like `openai/gpt-4o-mini` or `anthropic/claude-3.5-sonnet`.

@@ -15,7 +15,7 @@ experiment's own README:
 | Persuasion (hospital) | `experiments/persuasion/hospital/README.md` |
 
 Related: [`CUSTOM_OAI_COMPATIBLE_GUIDE.md`](./CUSTOM_OAI_COMPATIBLE_GUIDE.md)
-for the `custom-oai-compatible` provider and judge routing.
+for the `custom_oai_compatible` provider and judge routing.
 
 ---
 
@@ -335,7 +335,7 @@ what Terrarium's client factory reads. **Only the relevant topology knob per
 | `together` | `TOGETHER_API_KEY` | `model`, `base_url` (`https://api.together.xyz/v1`), `request_timeout` (60), `api_key` | |
 | `fireworks` | `FIREWORKS_API_KEY` | `model`, `base_url` (`https://api.fireworks.ai/inference/v1`), `request_timeout` (60), `api_key` | Alias `firework` accepted. |
 | `vllm` | — | see below | Local serving; spins up its own server. |
-| `custom-oai-compatible` | `OAI_COMPATIBLE_BASE_URL` + `OAI_COMPATIBLE_PROVIDER_KEY` | `model`, `base_url`, `api_key`, `request_timeout` (60) | Repo monkey-patch. See below. |
+| `custom_oai_compatible` | `OAI_COMPATIBLE_BASE_URL` + `OAI_COMPATIBLE_PROVIDER_KEY` | `model`, `base_url`, `api_key`, `request_timeout` (60) | Repo monkey-patch. Snake_case only — the hyphenated `custom-oai-compatible` raises. See below. |
 
 Unknown providers raise `ValueError` listing the six built-ins.
 
@@ -361,24 +361,27 @@ OpenAI additionally drops `temperature` for `o1`/`o3`/reasoning models and for
 `gpt-4.1-nano`/`gpt-5-nano`, and drops `reasoning_effort`/`verbosity` unless the
 model contains `gpt-5`.
 
-### ⚠ Bug: `custom-oai-compatible` drops your `params`
+### ⚠ Enforced: the `provider:` string must be `custom_oai_compatible`
 
-Terrarium's `get_generation_params` looks up the block by the **provider string**
-verbatim. The repo patch fixes `get_client_instance` and `get_model_name` for
-this provider but **not** `get_generation_params`. With the hyphenated
-`provider:` used in every shipped smoke config, the lookup key
-`custom-oai-compatible` never matches the `custom_oai_compatible:` block, and
-your params come back empty.
+The canonical `provider:` value for this backend is **`custom_oai_compatible`**
+(snake_case). Terrarium's `get_generation_params` looks up the params block by
+the **provider string verbatim** (`llm_config.get(provider)`), so the value you
+type must match the `custom_oai_compatible:` block name exactly.
 
-Verified behaviour:
+As of this fix the hyphenated `custom-oai-compatible` is **rejected**: the repo
+patch raises a `ValueError` at config-load / client-construction time and points
+you back to this section. Previously it was accepted but never matched the block,
+so your `params` were silently dropped — that history is why the older configs
+used the hyphenated form and why their `max_tokens`/`temperature` never took
+effect. It is now an enforced rule, not a workaround.
+
+Behaviour after the fix:
 
 ```
-provider='custom-oai-compatible'  block='custom_oai_compatible'  -> {}                      ← params dropped
 provider='custom_oai_compatible'  block='custom_oai_compatible'  -> {'max_tokens': 999, ...} ← works
+provider='custom-oai-compatible'  block='custom_oai_compatible'  -> ValueError (was: {})      ← rejected
 provider='openai'                 block='openai'                 -> {'max_tokens': 999, ...}
 ```
-
-**Workaround: use the snake_case provider string.**
 
 ```yaml
 llm_models:
@@ -387,15 +390,16 @@ llm_models:
       provider: custom_oai_compatible      # snake_case, NOT custom-oai-compatible
       custom_oai_compatible:
         model: deepseek/deepseek-v4.1-flash
-        params:                            # now actually applied
+        params:                            # applied verbatim
           max_tokens: 1024
           temperature: 0.7
 ```
 
-`docs/CUSTOM_OAI_COMPATIBLE_GUIDE.md` currently uses the hyphenated form, so its
-`params` examples do not take effect either. Without a fix, be aware your
-OpenRouter runs are using the provider's *own* default `max_tokens` — often
-truncating long agent turns.
+Every shipped smoke config already uses the snake_case form, and
+`docs/CUSTOM_OAI_COMPATIBLE_GUIDE.md` now does too. If you copy an older snippet
+with the hyphenated value, rename it before running — otherwise the run fails
+fast instead of silently using the provider's own default `max_tokens` (which
+often truncated long agent turns).
 
 ### `vllm` (local serving)
 
@@ -437,12 +441,13 @@ Terrarium auto-injects `--enable-auto-tool-choice --tool-call-parser hermes` for
 any model whose name contains `qwen`. Set `tool_call_parser` explicitly for
 other families or tool calling will silently fail.
 
-### `custom-oai-compatible`
+### `custom_oai_compatible`
 
 Implemented as a runtime monkey-patch in
-`experiments/common/_patch_terrarium.py`, not in Terrarium itself. `provider:` may
-be hyphenated or snake-cased; both are accepted. See
-[`CUSTOM_OAI_COMPATIBLE_GUIDE.md`](./CUSTOM_OAI_COMPATIBLE_GUIDE.md).
+`experiments/common/_patch_terrarium.py`, not in Terrarium itself. The
+`provider:` value must be the snake_case `custom_oai_compatible`; the hyphenated
+`custom-oai-compatible` is **not** accepted and raises a `ValueError` (see above).
+See [`CUSTOM_OAI_COMPATIBLE_GUIDE.md`](./CUSTOM_OAI_COMPATIBLE_GUIDE.md).
 
 ---
 
@@ -710,7 +715,7 @@ Same shape, default model `gpt-4`. Requires `OPENAI_API_KEY`.
 
 ```yaml
 judge_llm:
-  provider: custom-oai-compatible
+  provider: custom_oai_compatible
   custom_oai_compatible:
     model: openai/gpt-4o-mini
     params: {max_tokens: 512, temperature: 0.0}
@@ -840,8 +845,9 @@ on those files, read them from the run directory, not `logs/`.
    The runner forces `control`. This is why `summary.csv` is missing rows you
    "expect". Both counting and execution passes apply the filter, so the progress
    total stays correct — the rows simply never existed.
-3. **`custom-oai-compatible` silently drops your `params`.** Use the snake_case
-   `provider: custom_oai_compatible` — see §6.
+3. **The `custom-oai-compatible` provider requires the snake_case `provider:`
+   value `custom_oai_compatible`.** The hyphenated form raises a `ValueError` —
+   see §6.
 4. **`seed`, `top_p`, and `stop` in `params:` do nothing.** Every client discards
    them (§6).
 5. **`output_dir` gets a timestamp appended.** `resume.py --root` wants the
@@ -927,9 +933,6 @@ on those files, read them from the run directory, not `logs/`.
   messages reference `configs/quickstart.yaml`, which **does not exist**.
 - `experiments/collusion/configs/README.md` references
   `collusion_jira_topologies_env_assignment_fills.yaml`, which **does not exist**.
-- `docs/CUSTOM_OAI_COMPATIBLE_GUIDE.md` refers to branch `feature/openrouter-support`;
-  the functionality is on `main`. It also uses the hyphenated `provider:`
-  string, so its `params` examples do not take effect (§6).
 - `experiments/persuasion/hospital/` has plots but no `resume.py`, and the
   top-level README implies resume is available for all five experiments.
 
@@ -944,7 +947,7 @@ works at all. The de-facto schema is split across four places:
 | Sweep expansion, `experiment.*`, `run_id`, artifacts | `experiments/<exp>/run.py` | §7–§13 |
 | Graph construction, client factory, generation params | `terrarium/networks/factory.py`, `terrarium/utils.py` | §5, §6 |
 | Env parameters | `envs/dcops/*/*_env.py` (in the venv) | §4 |
-| `custom-oai-compatible` | `experiments/common/_patch_terrarium.py` (repo monkey-patch) | §6 |
+| `custom_oai_compatible` | `experiments/common/_patch_terrarium.py` (repo monkey-patch) | §6 |
 
 Terrarium is installed as a **wheel**, not an editable checkout
 (`terrarium-agents==0.1.1`, `site-packages/terrarium/`). `envs` is installed the
