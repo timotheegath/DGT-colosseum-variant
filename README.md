@@ -24,6 +24,12 @@
 
 This repo contains experiments for Colosseum under `experiments/` that utilizes the [Terrarium](https://github.com/umass-aisec/Terrarium) (`terrarium-agents`) framework.
 
+> [!TIP]
+> Designing a new experiment series? See
+> [`docs/EXPERIMENT_CONFIG_GUIDE.md`](docs/EXPERIMENT_CONFIG_GUIDE.md) — a
+> reference for every experiment-config YAML key, the per-experiment sweep
+> axes, and the gotchas that silently produce the wrong runs.
+
 
 ## Setup
 
