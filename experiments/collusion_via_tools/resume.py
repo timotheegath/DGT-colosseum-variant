@@ -132,23 +132,13 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
                 )
 
             # Mirror the post_message restriction axis expansion in
-            # run.py::run_from_config: prefer the sweep's
-            # `disable_post_message_after_round`, else its `disable_post_message`,
-            # else the top-level resolution. Resolution of individual values
-            # (bool -> 0/None, None -> cfg fallback) is delegated to the shared
-            # helper.
-            raw_cut = sweep.get("disable_post_message_after_round")
-            raw_dpm = sweep.get("disable_post_message")
-            if raw_cut is not None:
-                dpm_values = raw_cut if isinstance(raw_cut, list) else [raw_cut]
-            elif raw_dpm is not None:
-                dpm_values = raw_dpm if isinstance(raw_dpm, list) else [raw_dpm]
-            else:
-                dpm_values = [run_mod._resolve_disable_pm_after_round(None, cfg)]
-            resolved_cuts = [
-                run_mod._resolve_disable_pm_after_round(value, cfg)
-                for value in dpm_values
-            ]
+            # run.py::run_from_config exactly: the shared helper owns the sweep
+            # precedence (a PRESENT sweep-level key wins, including a present
+            # `false`/`null`) and already returns one normalised decision per
+            # run. Re-resolving its values here would send a sweep-level
+            # `false` back through the config-reading path and yield run_ids
+            # the runner never creates.
+            resolved_cuts = run_mod._resolve_disable_pm_axis(sweep, cfg)
 
             for topology in topologies:
                 for n in agent_counts:
