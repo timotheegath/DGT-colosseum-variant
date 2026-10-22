@@ -44,6 +44,7 @@ from experiments.common._patch_terrarium import (
     set_env_tools_blocked,
     set_post_message_call_limit,
     set_post_message_disabled,
+    set_secret_blackboard_id,
 )
 
 from terrarium.networks import build_communication_network
@@ -310,14 +311,25 @@ def _post_message_availability_mode(resolved: Optional[int]) -> str:
 def _compute_effective_secret_channel(
     secret_channel_enabled: bool,
     resolved_disable_pm_after_round: Optional[int],
+    *,
+    pre_coordination_round: bool = False,
 ) -> bool:
     """Whether a coalition-only secret blackboard is actually created.
 
     Mode ``0`` (``post_message`` disabled from the start) suppresses the secret
     channel even when it was requested, because there is no tool left to write
-    to it.
+    to it -- UNLESS the pre-coordination round is enabled, in which case the
+    secret blackboard is required for the pre-coordination phase even though
+    it will be unused after that round ends.
     """
-    return bool(secret_channel_enabled) and resolved_disable_pm_after_round != 0
+    if not secret_channel_enabled:
+        return False
+    if resolved_disable_pm_after_round != 0:
+        return True
+    # Mode 0: only keep the secret channel if the pre-coordination round
+    # needs it (the adversary uses post_message to the secret blackboard
+    # during that round, then loses it afterwards).
+    return pre_coordination_round
 
 
 def _build_run_id(
@@ -854,11 +866,15 @@ async def _run_single(
     secret_channel_enabled = bool(adv_cfg.get("secret_channel_enabled", False))
     coalition_clique_enabled = bool(adv_cfg.get("coalition_clique_enabled", False))
     # Mode 0 (post_message never available) makes a coalition-only secret
-    # blackboard pointless: there is no tool to write to it, so it is suppressed
-    # even when `secret_channel_enabled` is true. Persist the raw request as well
-    # so downstream analysis can tell "never requested" from "suppressed by 0".
+    # blackboard pointless: there is no tool to write to it -- UNLESS the
+    # pre-coordination round needs it, in which case the adversary uses
+    # post_message to the secret board during that single round and loses it
+    # afterwards. Persist the raw request as well so downstream analysis can
+    # tell "never requested" from "suppressed by 0".
     effective_secret_channel = _compute_effective_secret_channel(
-        secret_channel_enabled, resolved_disable_pm_after_round
+        secret_channel_enabled,
+        resolved_disable_pm_after_round,
+        pre_coordination_round=resolved_pre_coordination,
     )
 
     adversaries = _select_adversaries_hospital_coalition(
@@ -1008,6 +1024,10 @@ async def _run_single(
         # Restore the post_message state — the loop below assumes it is on.
         set_post_message_disabled(False)
         set_env_tools_blocked(True)
+        # Force any `post_message` call during this round onto the
+        # coalition-only secret blackboard so an adversarial agent cannot
+        # leak the coordination scheme to the public channel.
+        set_secret_blackboard_id(secret_blackboard_id)
         # Apply per-agent `post_message` cap for the pre-coordination round,
         # if configured. Resets the per-agent counter so each run starts
         # fresh even when concurrent runs share the process.
@@ -1066,6 +1086,10 @@ async def _run_single(
         # Restore env-tool gating for the simulation loop. `post_message` will
         # be re-set per-agent below based on `resolved_disable_pm_after_round`.
         set_env_tools_blocked(False)
+        # Stop rewriting `post_message` to the secret board during the main
+        # simulation loop: each adversary's normal planning/execution turn
+        # targets whatever blackboard the agent chooses.
+        set_secret_blackboard_id(None)
         # Lift the cap and clear counters for the main simulation loop, where
         # the existing per-round `disable_post_message_after_round` setting
         # owns `post_message` availability.

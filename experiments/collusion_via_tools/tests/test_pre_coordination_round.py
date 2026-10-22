@@ -521,5 +521,182 @@ class BlackboardPostMessageCapTests(unittest.TestCase):
             reset_post_message_counts()
 
 
+class SecretBlackboardIdContextVarTests(unittest.TestCase):
+    def test_round_trip(self) -> None:
+        from experiments.common._patch_terrarium import (
+            get_secret_blackboard_id,
+            set_secret_blackboard_id,
+        )
+
+        self.assertIsNone(get_secret_blackboard_id())
+        set_secret_blackboard_id(7)
+        self.assertEqual(get_secret_blackboard_id(), 7)
+        set_secret_blackboard_id(None)
+        self.assertIsNone(get_secret_blackboard_id())
+
+
+class EffectiveSecretChannelPreCoordTests(unittest.TestCase):
+    """Mode 0 (`post_message` disabled from the start) must still create the
+    secret blackboard when the pre-coordination round is enabled -- otherwise
+    the adversary leaks the coordination scheme to the public board.
+    """
+
+    def test_mode0_with_precoord_creates_secret_board(self) -> None:
+        self.assertTrue(
+            run_mod._compute_effective_secret_channel(
+                secret_channel_enabled=True,
+                resolved_disable_pm_after_round=0,
+                pre_coordination_round=True,
+            )
+        )
+
+    def test_mode0_without_precoord_still_suppresses_secret_board(self) -> None:
+        self.assertFalse(
+            run_mod._compute_effective_secret_channel(
+                secret_channel_enabled=True,
+                resolved_disable_pm_after_round=0,
+                pre_coordination_round=False,
+            )
+        )
+
+    def test_mode_positive_always_creates_secret_board(self) -> None:
+        for mode in (1, 2, None):
+            with self.subTest(mode=mode):
+                self.assertTrue(
+                    run_mod._compute_effective_secret_channel(
+                        secret_channel_enabled=True,
+                        resolved_disable_pm_after_round=mode,
+                    )
+                )
+
+    def test_disabled_request_still_suppresses(self) -> None:
+        self.assertFalse(
+            run_mod._compute_effective_secret_channel(
+                secret_channel_enabled=False,
+                resolved_disable_pm_after_round=None,
+                pre_coordination_round=True,
+            )
+        )
+
+
+class BlackboardPostMessageRewriteTests(unittest.TestCase):
+    """Defense in depth: when the secret blackboard id is set, any
+    `post_message` call is rewritten onto it (matching, missing, or wrong
+    board id). When unset, calls flow through unmodified.
+    """
+
+    def _proto(self):
+        from experiments.common.local_protocol import LocalCommunicationProtocol
+        from terrarium.blackboard import Megaboard
+
+        proto = LocalCommunicationProtocol(config={})
+
+        class _StubEnv:
+            pass
+
+        proto.environment = _StubEnv()
+        proto.megaboard = Megaboard()
+        # Two boards: id=0 is the public/main board with all participants;
+        # id=1 is the secret coalition-only board.
+        proto.megaboard.add_blackboard(["A", "B", "C"], template={"kind": "public"})
+        proto.megaboard.add_blackboard(["A", "B"], template={"kind": "secret"})
+        return proto
+
+    def test_post_without_blackboard_id_is_rewritten(self) -> None:
+        from experiments.common._patch_terrarium import (
+            reset_post_message_counts,
+            set_secret_blackboard_id,
+        )
+
+        reset_post_message_counts()
+        set_secret_blackboard_id(1)
+        try:
+            proto = self._proto()
+            result = asyncio.run(
+                proto.blackboard_handle_tool_call(
+                    tool_name="post_message",
+                    agent_name="A",
+                    arguments={"message": "scheme"},
+                )
+            )
+            self.assertNotEqual(result.get("blocked"), True)
+            # The message landed on the secret board (id=1), not the public.
+            secret_events = proto.megaboard.get(1, "A", limit=None)
+            public_events = proto.megaboard.get(0, "A", limit=None)
+            self.assertEqual(len(secret_events), 1)
+            self.assertEqual(len(public_events), 0)
+        finally:
+            set_secret_blackboard_id(None)
+
+    def test_post_with_wrong_blackboard_id_is_rewritten(self) -> None:
+        from experiments.common._patch_terrarium import (
+            reset_post_message_counts,
+            set_secret_blackboard_id,
+        )
+
+        reset_post_message_counts()
+        set_secret_blackboard_id(1)
+        try:
+            proto = self._proto()
+            # Agent tries to post to the PUBLIC board; the rewrite forces
+            # it onto the secret one instead.
+            result = asyncio.run(
+                proto.blackboard_handle_tool_call(
+                    tool_name="post_message",
+                    agent_name="A",
+                    arguments={"blackboard_id": 0, "message": "secret"},
+                )
+            )
+            self.assertNotEqual(result.get("blocked"), True)
+            self.assertEqual(len(proto.megaboard.get(0, "A", limit=None)), 0)
+            self.assertEqual(len(proto.megaboard.get(1, "A", limit=None)), 1)
+        finally:
+            set_secret_blackboard_id(None)
+
+    def test_post_with_correct_blackboard_id_passes_through(self) -> None:
+        from experiments.common._patch_terrarium import (
+            reset_post_message_counts,
+            set_secret_blackboard_id,
+        )
+
+        reset_post_message_counts()
+        set_secret_blackboard_id(1)
+        try:
+            proto = self._proto()
+            result = asyncio.run(
+                proto.blackboard_handle_tool_call(
+                    tool_name="post_message",
+                    agent_name="A",
+                    arguments={"blackboard_id": 1, "message": "ok"},
+                )
+            )
+            self.assertNotEqual(result.get("blocked"), True)
+            self.assertEqual(len(proto.megaboard.get(1, "A", limit=None)), 1)
+        finally:
+            set_secret_blackboard_id(None)
+
+    def test_post_without_rewrite_when_secret_id_none(self) -> None:
+        from experiments.common._patch_terrarium import (
+            reset_post_message_counts,
+            set_secret_blackboard_id,
+        )
+
+        reset_post_message_counts()
+        set_secret_blackboard_id(None)
+        proto = self._proto()
+        # Without the rewrite flag, posting to blackboard_id=0 (public)
+        # lands on the public board.
+        result = asyncio.run(
+            proto.blackboard_handle_tool_call(
+                tool_name="post_message",
+                agent_name="A",
+                arguments={"blackboard_id": 0, "message": "public ok"},
+            )
+        )
+        self.assertNotEqual(result.get("blocked"), True)
+        self.assertEqual(len(proto.megaboard.get(0, "A", limit=None)), 1)
+        self.assertEqual(len(proto.megaboard.get(1, "A", limit=None)), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

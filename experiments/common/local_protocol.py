@@ -13,6 +13,7 @@ from terrarium.environment_tools import (
 from experiments.common._patch_terrarium import (
     get_post_message_call_limit,
     get_post_message_count,
+    get_secret_blackboard_id,
     is_env_tools_blocked,
     record_post_message_call,
 )
@@ -268,6 +269,26 @@ class LocalCommunicationProtocol(BaseCommunicationProtocol):
         phase: Optional[str] = None,
         iteration: Optional[int] = None,
     ) -> Dict[str, Any]:
+        # Defense in depth for the pre-coordination round: rewrite any
+        # `post_message` call to the coalition-only secret board so the agent
+        # cannot accidentally leak the coordination scheme to the public
+        # blackboard. We do NOT rewrite arguments if the agent explicitly
+        # targeted the secret board already (avoids double-instrumenting).
+        if tool_name == "post_message":
+            secret_bb = get_secret_blackboard_id()
+            if secret_bb is not None:
+                targeted_bb = arguments.get("blackboard_id")
+                if targeted_bb is None:
+                    arguments = dict(arguments)
+                    arguments["blackboard_id"] = secret_bb
+                else:
+                    try:
+                        if int(targeted_bb) != int(secret_bb):
+                            arguments = dict(arguments)
+                            arguments["blackboard_id"] = secret_bb
+                    except (TypeError, ValueError):
+                        arguments = dict(arguments)
+                        arguments["blackboard_id"] = secret_bb
         # Per-agent `post_message` cap (e.g. for the pre-coordination round).
         # When the cap is set and the agent is over it, return a structured
         # rejection so the agent can wrap up its coordination message.

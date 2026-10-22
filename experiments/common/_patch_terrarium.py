@@ -490,6 +490,35 @@ def get_post_message_call_limit() -> Optional[int]:
     return _POST_MESSAGE_CALL_LIMIT.get()
 
 
+# ---------------------------------------------------------------------------
+# Secret blackboard id (for the pre-coordination round: if set, the protocol
+# layer rewrites any `post_message` call to this board so the agent cannot
+# accidentally post to the public channel during the preparation turn).
+# ---------------------------------------------------------------------------
+_SECRET_BLACKBOARD_ID: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
+    "colosseum_secret_blackboard_id", default=None
+)
+
+
+def set_secret_blackboard_id(bb_id: Optional[int]) -> None:
+    """Set the secret blackboard id that ``post_message`` calls should be
+    redirected to (``None`` = no rewriting).
+
+    Used during the pre-coordination round to guarantee that adversarial
+    coordination stays on the coalition-only board even if the model omits
+    ``blackboard_id`` or picks the public board by mistake.
+    """
+    if bb_id is None:
+        _SECRET_BLACKBOARD_ID.set(None)
+    else:
+        _SECRET_BLACKBOARD_ID.set(int(bb_id))
+
+
+def get_secret_blackboard_id() -> Optional[int]:
+    """Return the secret blackboard id (``None`` = no rewriting)."""
+    return _SECRET_BLACKBOARD_ID.get()
+
+
 def _install_blackboard_tools_patch() -> None:
     """Patch ToolsetDiscovery to allow disabling post_message dynamically."""
     try:
