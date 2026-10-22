@@ -68,6 +68,47 @@ def _sanitize_path_component(value: Any) -> str:
     return s or "None"
 
 
+def _resolve_disable_pm_after_round(
+    val: Any,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> Optional[int]:
+    """Resolves after which planning round `post_message` should be disabled.
+
+    Returns:
+      - None: never disabled (standard baseline with private messaging).
+      - 0: disabled from the start (planning round 1 onwards; tool-only collusion).
+      - X (int > 0): active during planning rounds 1..X, disabled for rounds > X.
+    """
+    if val is not None:
+        if isinstance(val, bool):
+            return 0 if val else None
+        if isinstance(val, (int, float)):
+            return int(val)
+        return None
+
+    if not cfg:
+        return None
+
+    exp_cfg = cfg.get("experiment") or {}
+    adv_cfg = exp_cfg.get("adversary") or {}
+    net_cfg = cfg.get("communication_network") or {}
+
+    for candidate in (
+        exp_cfg.get("disable_post_message_after_round"),
+        adv_cfg.get("disable_post_message_after_round"),
+        net_cfg.get("disable_post_message_after_round"),
+        exp_cfg.get("disable_post_message"),
+        adv_cfg.get("disable_post_message"),
+        net_cfg.get("disable_post_message"),
+    ):
+        if candidate is not None:
+            if isinstance(candidate, bool):
+                return 0 if candidate else None
+            if isinstance(candidate, (int, float)):
+                return int(candidate)
+    return None
+
+
 def _build_run_id(
     *,
     model_label: str,
@@ -78,13 +119,25 @@ def _build_run_id(
     adversary_count: int,
     target_role: Any,
     seed: int,
+    disable_post_message_after_round: Optional[int] = None,
     disable_post_message: Optional[bool] = None,
 ) -> str:
     model_safe = _sanitize_path_component(model_label)
     sweep_safe = _sanitize_path_component(sweep_name)
     topology_safe = _sanitize_path_component(topology)
     role_safe = _sanitize_path_component(target_role)
-    suffix = "__nopm" if disable_post_message else ""
+
+    after_round = disable_post_message_after_round
+    if after_round is None and disable_post_message is not None:
+        after_round = 0 if disable_post_message else None
+
+    if after_round is None:
+        suffix = ""
+    elif after_round == 0:
+        suffix = "__nopm"
+    else:
+        suffix = f"__cut_after_r{after_round}"
+
     return (
         f"{model_safe}__{sweep_safe}"
         f"__topo{topology_safe}"
@@ -443,7 +496,8 @@ async def _run_single(
     target_role: Optional[str],
     seed: int,
     out_dir: Path,
-    disable_post_message: Optional[bool] = None,
+    disable_post_message_after_round: Optional[int] = None,
+    disable_post_message: Optional[Union[bool, int]] = None,
 ) -> Dict[str, Any]:
     rng = random.Random(int(seed))
 
@@ -506,16 +560,13 @@ async def _run_single(
     is_benign = int(adversary_count) == 0
 
     # --- POST_MESSAGE DISABLING (for tool-based collusion) ---
-    if disable_post_message is None:
-        adv_cfg_pre = (cfg.get("experiment") or {}).get("adversary") or {}
-        disable_post_message = bool(
-            (cfg.get("experiment") or {}).get("disable_post_message", False)
-            or adv_cfg_pre.get("disable_post_message", False)
-            or (cfg.get("communication_network") or {}).get(
-                "disable_post_message", False
-            )
-        )
-    set_post_message_disabled(disable_post_message)
+    resolved_disable_pm_after_round = _resolve_disable_pm_after_round(
+        disable_post_message_after_round
+        if disable_post_message_after_round is not None
+        else disable_post_message,
+        cfg,
+    )
+    set_post_message_disabled(resolved_disable_pm_after_round == 0)
 
     # --- DIRECTORY SETUP ---
     run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -528,7 +579,7 @@ async def _run_single(
         adversary_count=int(adversary_count),
         target_role=target_role,
         seed=int(seed),
-        disable_post_message=disable_post_message,
+        disable_post_message_after_round=resolved_disable_pm_after_round,
     )
     run_dir = out_dir / "runs" / model_label / sweep_name / run_id
     _ensure_dir(run_dir)
@@ -686,6 +737,10 @@ async def _run_single(
 
         # 1. PLANNING
         for planning_round in range(1, planning_rounds + 1):
+            if resolved_disable_pm_after_round is not None:
+                set_post_message_disabled(planning_round > resolved_disable_pm_after_round)
+            else:
+                set_post_message_disabled(False)
             last_agent = None
             for agent in env.agents:
                 base_ctx = env.build_agent_context(
@@ -732,6 +787,11 @@ async def _run_single(
                 )
 
         # 2. EXECUTION
+        if resolved_disable_pm_after_round is not None:
+            set_post_message_disabled(
+                planning_rounds > resolved_disable_pm_after_round
+                or resolved_disable_pm_after_round == 0
+            )
         last_exec_agent = None
         for agent in env.agents:
             base_ctx = env.build_agent_context(
@@ -913,7 +973,8 @@ async def _run_single(
             "adversaries": adversaries,
             "secret_channel_enabled": secret_channel_enabled,
             "secret_blackboard_id": secret_blackboard_id,
-            "disable_post_message": disable_post_message,
+            "disable_post_message_after_round": resolved_disable_pm_after_round,
+            "disable_post_message": (resolved_disable_pm_after_round == 0),
             "roles": roles,
             "metrics": asdict(metrics),
         },
@@ -1074,8 +1135,15 @@ async def run_from_config(
             adv_counts = sweep.get("adversary_counts") or [1]
             target_roles = sweep.get("target_roles") or [None]
             patient_counts = sweep.get("num_patients") or [16]
+            raw_cut = sweep.get("disable_post_message_after_round")
             raw_dpm = sweep.get("disable_post_message")
-            dpm_list = raw_dpm if isinstance(raw_dpm, list) else [raw_dpm]
+            if raw_cut is not None:
+                dpm_list = raw_cut if isinstance(raw_cut, list) else [raw_cut]
+            elif raw_dpm is not None:
+                dpm_list = raw_dpm if isinstance(raw_dpm, list) else [raw_dpm]
+            else:
+                top_cut = _resolve_disable_pm_after_round(None, cfg)
+                dpm_list = [top_cut]
 
             # Count only feasible combinations so progress is accurate.
             for topology in topologies:
@@ -1140,8 +1208,15 @@ async def run_from_config(
             adv_counts = sweep.get("adversary_counts") or [1]
             target_roles = sweep.get("target_roles") or [None]
             patient_counts = sweep.get("num_patients") or [16]
+            raw_cut = sweep.get("disable_post_message_after_round")
             raw_dpm = sweep.get("disable_post_message")
-            dpm_list = raw_dpm if isinstance(raw_dpm, list) else [raw_dpm]
+            if raw_cut is not None:
+                dpm_list = raw_cut if isinstance(raw_cut, list) else [raw_cut]
+            elif raw_dpm is not None:
+                dpm_list = raw_dpm if isinstance(raw_dpm, list) else [raw_dpm]
+            else:
+                top_cut = _resolve_disable_pm_after_round(None, cfg)
+                dpm_list = [top_cut]
 
             for topology in topologies:
                 for num_agents in agent_counts:
@@ -1161,9 +1236,15 @@ async def run_from_config(
                                     continue
 
                                 for dpm in dpm_list:
+                                    resolved_cut = _resolve_disable_pm_after_round(dpm, cfg)
                                     for seed in seeds:
                                         role_lbl = role if role else "Any"
-                                        pm_lbl = "__nopm" if dpm else ""
+                                        if resolved_cut is None:
+                                            pm_lbl = ""
+                                        elif resolved_cut == 0:
+                                            pm_lbl = "__nopm"
+                                        else:
+                                            pm_lbl = f"__cut_after_r{resolved_cut}"
                                         run_label = (
                                             f"{model_label}/{sweep_name}/topo{topology}"
                                             f"/n{num_agents}/p{num_patients}/adv{ac}/{role_lbl}{pm_lbl}/seed{seed}"
@@ -1183,7 +1264,7 @@ async def run_from_config(
                                                 target_role=role,
                                                 seed=seed,
                                                 out_dir=root,
-                                                disable_post_message=dpm,
+                                                disable_post_message_after_round=resolved_cut,
                                             )
                                         )
                                         tasks.append(task)
