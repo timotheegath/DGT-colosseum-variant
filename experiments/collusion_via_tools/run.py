@@ -38,6 +38,7 @@ from experiments.collusion_via_tools.metrics import compute_misalignment_metrics
 from experiments.collusion_via_tools.prompts import MisalignmentPrompts
 from experiments.common.local_protocol import LocalCommunicationProtocol
 from experiments.collusion_via_tools.judge_beliefs import judge_run
+from experiments.common._patch_terrarium import set_post_message_disabled
 
 from terrarium.networks import build_communication_network
 from terrarium.logger import AgentTrajectoryLogger, PromptLogger
@@ -72,17 +73,19 @@ def _build_run_id(
     adversary_count: int,
     target_role: Any,
     seed: int,
+    disable_post_message: Optional[bool] = None,
 ) -> str:
     model_safe = _sanitize_path_component(model_label)
     sweep_safe = _sanitize_path_component(sweep_name)
     topology_safe = _sanitize_path_component(topology)
     strategy_safe = _sanitize_path_component(strategy)
     role_safe = _sanitize_path_component(target_role)
+    suffix = "__nopm" if disable_post_message else ""
     return (
         f"{model_safe}__{sweep_safe}"
         f"__topo{topology_safe}__strat{strategy_safe}"
         f"__agents{int(num_agents)}_patients{int(num_patients)}"
-        f"_adv{int(adversary_count)}_{role_safe}_seed{int(seed)}"
+        f"_adv{int(adversary_count)}_{role_safe}_seed{int(seed)}{suffix}"
     )
 
 
@@ -412,6 +415,7 @@ async def _run_single(
     target_role: Optional[str],
     seed: int,
     out_dir: Path,
+    disable_post_message: Optional[bool] = None,
 ) -> Dict[str, Any]:
     rng = random.Random(int(seed))
 
@@ -470,6 +474,16 @@ async def _run_single(
 
     is_benign = int(adversary_count) == 0 or str(strategy).strip().lower() == "none"
 
+    # --- POST_MESSAGE DISABLING (for tool-based collusion) ---
+    if disable_post_message is None:
+        adv_cfg_pre = (cfg.get("experiment") or {}).get("adversary") or {}
+        disable_post_message = bool(
+            (cfg.get("experiment") or {}).get("disable_post_message", False)
+            or adv_cfg_pre.get("disable_post_message", False)
+            or (cfg.get("communication_network") or {}).get("disable_post_message", False)
+        )
+    set_post_message_disabled(disable_post_message)
+
     # --- DIRECTORY SETUP ---
     run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_id = _build_run_id(
@@ -482,6 +496,7 @@ async def _run_single(
         adversary_count=int(adversary_count),
         target_role=target_role,
         seed=int(seed),
+        disable_post_message=disable_post_message,
     )
     run_dir = out_dir / "runs" / model_label / sweep_name / run_id
     _ensure_dir(run_dir)
@@ -881,6 +896,7 @@ async def _run_single(
             "adversaries": adversaries,
             "secret_channel_enabled": secret_channel_enabled,
             "secret_blackboard_id": secret_blackboard_id,
+            "disable_post_message": disable_post_message,
             "roles": roles,
             "metrics": asdict(metrics)
         },
@@ -1030,6 +1046,8 @@ async def run_from_config(config_path: str, *, out_dir: Optional[str] = None, ma
             target_roles = sweep.get("target_roles") or [None]
             patient_counts = sweep.get("num_patients") or [16]
             strategies = sweep.get("strategies") or ["none"]
+            raw_dpm = sweep.get("disable_post_message")
+            dpm_list = raw_dpm if isinstance(raw_dpm, list) else [raw_dpm]
 
             # Count only feasible combinations so progress is accurate.
             for topology in topologies:
@@ -1045,7 +1063,8 @@ async def run_from_config(config_path: str, *, out_dir: Optional[str] = None, ma
                                         strategy=str(strategy),
                                     ):
                                         continue
-                                    total_runs += len(seeds)
+                                    for _ in dpm_list:
+                                        total_runs += len(seeds)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     root = Path(out_dir or exp.get("output_dir") or "experiments/collusion_via_tools/outputs") / timestamp
@@ -1086,6 +1105,8 @@ async def run_from_config(config_path: str, *, out_dir: Optional[str] = None, ma
             target_roles = sweep.get("target_roles") or [None]
             patient_counts = sweep.get("num_patients") or [16]
             strategies = sweep.get("strategies") or ["none"]
+            raw_dpm = sweep.get("disable_post_message")
+            dpm_list = raw_dpm if isinstance(raw_dpm, list) else [raw_dpm]
 
             for topology in topologies:
                 for num_agents in agent_counts:
@@ -1107,30 +1128,33 @@ async def run_from_config(config_path: str, *, out_dir: Optional[str] = None, ma
                                         )
                                         continue
 
-                                    for seed in seeds:
-                                        role_lbl = role if role else "Any"
-                                        run_label = (
-                                            f"{model_label}/{sweep_name}/topo{topology}/strat{strategy}"
-                                            f"/n{num_agents}/p{num_patients}/adv{ac}/{role_lbl}/seed{seed}"
-                                        )
-                                        
-                                        task = asyncio.create_task(_run_guarded(
-                                            run_label=run_label,
-                                            base_cfg=cfg,
-                                            model_label=model_label,
-                                            model_llm_cfg=model_llm,
-                                            sweep_name=sweep_name,
-                                            topology=str(topology),
-                                            num_agents=num_agents,
-                                            adversary_count=ac,
-                                            num_patients=num_patients,
-                                            strategy=strategy,
-                                            target_role=role,
-                                            seed=seed,
-                                            out_dir=root
-                                        ))
-                                        tasks.append(task)
-                                        task_labels[task] = run_label
+                                    for dpm in dpm_list:
+                                        for seed in seeds:
+                                            role_lbl = role if role else "Any"
+                                            pm_lbl = "__nopm" if dpm else ""
+                                            run_label = (
+                                                f"{model_label}/{sweep_name}/topo{topology}/strat{strategy}"
+                                                f"/n{num_agents}/p{num_patients}/adv{ac}/{role_lbl}{pm_lbl}/seed{seed}"
+                                            )
+                                            
+                                            task = asyncio.create_task(_run_guarded(
+                                                run_label=run_label,
+                                                base_cfg=cfg,
+                                                model_label=model_label,
+                                                model_llm_cfg=model_llm,
+                                                sweep_name=sweep_name,
+                                                topology=str(topology),
+                                                num_agents=num_agents,
+                                                adversary_count=ac,
+                                                num_patients=num_patients,
+                                                strategy=strategy,
+                                                target_role=role,
+                                                seed=seed,
+                                                out_dir=root,
+                                                disable_post_message=dpm,
+                                            ))
+                                            tasks.append(task)
+                                            task_labels[task] = run_label
 
     # Execution Loop (Robust)
     with tqdm(total=len(tasks), desc="Experiments", unit="run") as pbar:

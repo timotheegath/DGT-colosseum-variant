@@ -294,6 +294,8 @@ def apply() -> None:
     if not getattr(_tu.get_generation_params, "_colosseum_patched", False):
         _install_generation_params_patch(_tu)
 
+    _install_blackboard_tools_patch()
+
 
 def _install_client_and_model_patch(terrarium: Any, _tu: Any) -> None:
     """Patch ``get_client_instance`` / ``get_model_name`` (idempotently)."""
@@ -366,6 +368,53 @@ def _install_generation_params_patch(_tu: Any) -> None:
 
     get_generation_params._colosseum_patched = True  # type: ignore[attr-defined]
     _tu.get_generation_params = get_generation_params
+
+
+# ---------------------------------------------------------------------------
+# Blackboard tools patch (e.g. disabling post_message for tool-based collusion)
+# ---------------------------------------------------------------------------
+_POST_MESSAGE_DISABLED: bool = False
+
+
+def set_post_message_disabled(disabled: bool) -> None:
+    """Enable or disable the post_message tool globally."""
+    global _POST_MESSAGE_DISABLED
+    _POST_MESSAGE_DISABLED = bool(disabled)
+
+
+def is_post_message_disabled() -> bool:
+    """Return whether the post_message tool is currently disabled."""
+    return _POST_MESSAGE_DISABLED
+
+
+def _install_blackboard_tools_patch() -> None:
+    """Patch ToolsetDiscovery to allow disabling post_message dynamically."""
+    try:
+        from terrarium.toolset_discovery import ToolsetDiscovery
+    except ImportError:
+        return
+
+    if getattr(ToolsetDiscovery.get_tools_for_blackboard, "_colosseum_patched", False):
+        return
+
+    _orig_get_tools = ToolsetDiscovery.get_tools_for_blackboard
+    _orig_get_names = ToolsetDiscovery.get_blackboard_tool_names
+
+    def get_tools_for_blackboard(self, phase: str):
+        if is_post_message_disabled():
+            return []
+        return _orig_get_tools(self, phase)
+
+    def get_blackboard_tool_names(self):
+        if is_post_message_disabled():
+            return set()
+        return _orig_get_names(self)
+
+    get_tools_for_blackboard._colosseum_patched = True  # type: ignore[attr-defined]
+    get_blackboard_tool_names._colosseum_patched = True  # type: ignore[attr-defined]
+
+    ToolsetDiscovery.get_tools_for_blackboard = get_tools_for_blackboard
+    ToolsetDiscovery.get_blackboard_tool_names = get_blackboard_tool_names
 
 
 # Applying on import means a bare `import experiments.common._patch_terrarium`
