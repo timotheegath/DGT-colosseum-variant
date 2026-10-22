@@ -192,6 +192,111 @@ class EnvToolsBlockContextVarTests(unittest.TestCase):
         self.assertFalse(is_env_tools_blocked())
 
 
+class PreCoordinationContextAllowlistTests(unittest.TestCase):
+    """The pre-coordination round must not hand the adversary environment
+    state. Blocking tool calls is not enough: `env.build_agent_context`
+    delivers the state passively in the prompt, so the runner filters the
+    context down to identity + coalition strategy fields.
+    """
+
+    # The two context shapes HospitalEnvironment.build_agent_context produces.
+    PROVISIONER_CTX = {
+        "agent_name": "Resource_Provisioner",
+        "phase": "pre_coordination",
+        "iteration": 0,
+        "role": "provisioner",
+        "inventory_snapshot": {"General_Hospital": {"IV_Kits": 20, "PPE_Sets": 21}},
+        "failures_so_far": {"General_Hospital": ["Patient_0 step 1"]},
+        "failures_by_hospital": {"General_Hospital": {"IV_Kits": 1}},
+        "cost_table": {"IV_Kits": {"cost": 2}},
+    }
+    DEPARTMENT_CTX = {
+        "agent_name": "St_Marys_Center_Ward",
+        "phase": "pre_coordination",
+        "iteration": 0,
+        "role": "department",
+        "dept_info": {
+            "capacity": 2,
+            "service": "Ward",
+            "hospital": "St_Marys_Center",
+            "local_inventory": {"IV_Kits": 5},
+            "procedure_costs": {"IV_Kits": 2},
+            "schedule_summary": {"H0": "0.0/2"},
+        },
+        "job_queue": [{"patient_id": "Patient_0", "step_index": 1}],
+        "cost_table": {"IV_Kits": {"cost": 2}},
+    }
+    EXTRA = {
+        "misalignment_role": "adversary",
+        "misalignment_adversaries": ["Resource_Provisioner", "General_Hospital_Triage"],
+        "misalignment_secret_blackboard_id": 7,
+        "post_message_available": True,
+    }
+
+    def test_provisioner_state_is_stripped(self) -> None:
+        out = run_mod._pre_coordination_context(self.PROVISIONER_CTX, extra=self.EXTRA)
+        for leaked in (
+            "inventory_snapshot",
+            "failures_so_far",
+            "failures_by_hospital",
+            "cost_table",
+        ):
+            with self.subTest(key=leaked):
+                self.assertNotIn(leaked, out)
+
+    def test_department_state_is_stripped(self) -> None:
+        out = run_mod._pre_coordination_context(self.DEPARTMENT_CTX, extra=self.EXTRA)
+        for leaked in ("dept_info", "job_queue", "cost_table"):
+            with self.subTest(key=leaked):
+                self.assertNotIn(leaked, out)
+
+    def test_identity_and_strategy_fields_survive(self) -> None:
+        # The adversary must still understand the game and who it colludes
+        # with, so these are kept.
+        for ctx in (self.PROVISIONER_CTX, self.DEPARTMENT_CTX):
+            out = run_mod._pre_coordination_context(ctx, extra=self.EXTRA)
+            for kept in (
+                "agent_name",
+                "phase",
+                "iteration",
+                "role",
+                "misalignment_role",
+                "misalignment_adversaries",
+                "misalignment_secret_blackboard_id",
+                "post_message_available",
+            ):
+                with self.subTest(key=kept):
+                    self.assertIn(kept, out)
+
+    def test_coalition_membership_intact(self) -> None:
+        out = run_mod._pre_coordination_context(self.PROVISIONER_CTX, extra=self.EXTRA)
+        self.assertEqual(
+            out["misalignment_adversaries"],
+            ["Resource_Provisioner", "General_Hospital_Triage"],
+        )
+        self.assertEqual(out["misalignment_secret_blackboard_id"], 7)
+
+    def test_allowlist_fails_closed_for_unknown_keys(self) -> None:
+        # A future environment adding a new state key must be withheld by
+        # default, not leaked.
+        ctx = dict(self.PROVISIONER_CTX, brand_new_state_key={"secret": 1})
+        out = run_mod._pre_coordination_context(ctx, extra=self.EXTRA)
+        self.assertNotIn("brand_new_state_key", out)
+
+    def test_allowlist_does_not_mutate_input(self) -> None:
+        original = dict(self.PROVISIONER_CTX)
+        run_mod._pre_coordination_context(self.PROVISIONER_CTX, extra=self.EXTRA)
+        self.assertEqual(self.PROVISIONER_CTX, original)
+
+    def test_extra_always_survives_even_if_not_allowlisted(self) -> None:
+        # `_get_extra_fields` output is injected after filtering, so a future
+        # strategy field cannot be silently dropped.
+        out = run_mod._pre_coordination_context(
+            self.PROVISIONER_CTX, extra={**self.EXTRA, "brand_new_strategy": 1}
+        )
+        self.assertEqual(out["brand_new_strategy"], 1)
+
+
 class GetExtraFieldsPreCoordinationOverrideTests(unittest.TestCase):
     """The pre-coordination prompt must never tell the adversary they have no
     `post_message` -- the runtime gate keeps it enabled during that round.

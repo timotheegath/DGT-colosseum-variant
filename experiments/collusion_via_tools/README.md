@@ -109,12 +109,39 @@ All three accept a scalar at the top level or per sweep; the **most specific key
 
 Presence is what matters, not truthiness: an explicit `false` or `null` at a more specific level means "unrestricted here" and stops the search rather than falling through. So a sweep can override a top-level `true` with `false`.
 
-### Pre-coordination round behaviour
+### Pre-coordination round
 
-- Only adversaries get the turn; honest agents keep their normal preparation time.
-- The adversary gets the planning-shaped prompt plus a dedicated block stating this is their one chance to agree on a tool-only protocol.
-- Environment tools (`broadcast_message`, `transfer_resources`, `schedule_patient`, …) are blocked — any call is silently dropped, so the adversary cannot probe the environment before losing the channel.
-- `post_message` works, and is forced onto the coalition-only blackboard: a call aimed at the public board is rewritten to the secret one, so the scheme cannot leak to honest agents.
+One adversary-only turn runs **before** iteration 1, so the coalition can agree on a tool-only protocol *before* losing `post_message`. Honest agents get no such turn and keep their normal preparation time.
+
+#### What the adversary can see
+
+| | |
+| --- | --- |
+| **Identity** | its own agent name and role. Note the name itself encodes hospital and service (`St_Marys_Center_Ward`), so those are known — but nothing about the *current* state of either hospital. |
+| **Coalition** | the list of colluders, and the coalition-only blackboard id |
+| **The game** | the objective, the covert-mode rules, the protected-hospital rule, and the generic resource-threshold knowledge (`IV_Kits`/`PPE_Sets` safe-buffer targets) that is part of the static strategy text |
+| **Its tools** | the full tool list — `post_message` plus the environment tools it is told about (but cannot call, see below) |
+
+#### What the adversary cannot see
+
+**No environment state at all.** The runner replaces the context that `env.build_agent_context` builds with a minimal, allowlisted one. Everything below is withheld:
+
+- `inventory_snapshot` — live inventory of every hospital
+- `failures_so_far`, `failures_by_hospital` — the failure history
+- `job_queue`, `schedule_summary` — pending work and the schedule
+- `dept_info` (capacity, local inventory, `procedure_costs`)
+- `cost_table` — the cost of each procedure
+
+This filtering is necessary because blocking *tool calls* is not enough: the environment hands the same state to the agent passively, through the prompt. The allowlist fails closed — a key a future environment adds is withheld until it is explicitly opted in.
+
+#### What the adversary can do
+
+- **Post to the coalition-only blackboard.** Calls are forced onto the secret board, so a call aimed at the public board is rewritten and the scheme cannot leak to honest agents.
+- Optionally capped by `pre_coordination_max_messages`.
+
+#### What the adversary cannot do
+
+- **Call any environment tool.** `broadcast_message`, `transfer_resources`, `schedule_patient`, … are all blocked; any call is silently dropped and returns nothing. The adversary therefore cannot probe the environment, and cannot commit to an operational action, before losing the channel.
 
 The secret blackboard is created automatically whenever the coordination round runs, even if `disable_post_message: true` would otherwise suppress it.
 

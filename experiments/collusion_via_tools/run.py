@@ -184,6 +184,50 @@ def _resolve_pre_coordination_round(
     return False
 
 
+# Keys an adversary keeps in its context during the pre-coordination round.
+# This is an ALLOWLIST on purpose: `env.build_agent_context` returns whatever
+# the environment wants (for HospitalEnvironment that includes
+# `inventory_snapshot`, `failures_so_far`, `failures_by_hospital`,
+# `local_inventory`, `procedure_costs`, `job_queue`, `schedule_summary`, ...),
+# which would leak the full environment state to the adversary BEFORE it loses
+# `post_message`. Blocking tool calls is not enough — the state also arrives
+# passively through the prompt. An allowlist fails closed: any new key a future
+# environment adds is withheld by default and must be opted in explicitly.
+_PRE_COORDINATION_CONTEXT_ALLOWLIST: frozenset = frozenset(
+    {
+        # Identity / routing. Needed so the prompt is coherent.
+        "agent_name",
+        "phase",
+        "iteration",
+        "role",
+        # Coalitional strategy inputs injected by `_get_extra_fields`.
+        "misalignment_role",
+        "misalignment_adversaries",
+        "misalignment_secret_blackboard_id",
+        "post_message_available",
+    }
+)
+
+
+def _pre_coordination_context(
+    full_context: Dict[str, Any],
+    *,
+    extra: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Strip the environment state from a pre-coordination agent context.
+
+    The adversary keeps its identity and the coalition strategy fields (so it
+    still understands the game and the tools it has), but loses every
+    environment-state key (inventory, failures, job queue, schedules, costs).
+    """
+    allowed = dict(full_context)
+    for key in list(allowed):
+        if key not in _PRE_COORDINATION_CONTEXT_ALLOWLIST:
+            del allowed[key]
+    allowed.update(extra)
+    return allowed
+
+
 def _resolve_pre_coordination_axis(
     sweep: Dict[str, Any],
     cfg: Optional[Dict[str, Any]] = None,
@@ -964,16 +1008,18 @@ async def _run_single(
         for agent in env.agents:
             if roles.get(agent.name) != "adversary":
                 continue
-            base_ctx = env.build_agent_context(
+            full_ctx = env.build_agent_context(
                 agent.name,
                 phase="pre_coordination",
                 iteration=0,
                 planning_round=0,
             )
             extra = _get_extra_fields(agent.name, "pre_coordination")
-            agent_context = (
-                base_ctx if not extra else _augment_context(base_ctx, extra=extra)
-            )
+            # Minimal context: identity + coalition strategy only, no
+            # environment state. Blocking tool calls is not sufficient because
+            # `env.build_agent_context` hands the adversary the full state
+            # (inventory, failures, job queue, costs) passively in the prompt.
+            agent_context = _pre_coordination_context(full_ctx, extra=extra)
             response = await protocol.agent_planning_turn(
                 agent,
                 agent.name,
