@@ -784,7 +784,12 @@ async def _run_single(
     planning_rounds = int(cfg["simulation"].get("max_planning_rounds", 1))
     turns: List[Dict[str, Any]] = []
 
-    def _get_extra_fields(agent_name: str, phase: str) -> Dict[str, Any]:
+    def _get_extra_fields(
+        agent_name: str,
+        phase: str,
+        planning_round: Optional[int] = None,
+        iteration: Optional[int] = None,
+    ) -> Dict[str, Any]:
         if is_benign:
             return {}
         return {
@@ -794,6 +799,9 @@ async def _run_single(
             if roles.get(agent_name) == "adversary"
             else None,
             "phase": phase,
+            "planning_round": planning_round,
+            "iteration": iteration,
+            "disable_post_message_after_round": resolved_disable_pm_after_round,
         }
 
     current_iteration = 0
@@ -821,7 +829,9 @@ async def _run_single(
                     iteration=iteration,
                     planning_round=planning_round,
                 )
-                extra = _get_extra_fields(agent.name, "planning")
+                extra = _get_extra_fields(
+                    agent.name, "planning", planning_round=planning_round, iteration=iteration
+                )
                 agent_context = (
                     base_ctx if not extra else _augment_context(base_ctx, extra=extra)
                 )
@@ -870,7 +880,7 @@ async def _run_single(
             base_ctx = env.build_agent_context(
                 agent.name, phase="execution", iteration=iteration
             )
-            extra = _get_extra_fields(agent.name, "execution")
+            extra = _get_extra_fields(agent.name, "execution", iteration=iteration)
             agent_context = (
                 base_ctx if not extra else _augment_context(base_ctx, extra=extra)
             )
@@ -910,7 +920,9 @@ async def _run_single(
         base_ctx = env.build_agent_context(
             agent.name, phase="survey", iteration=max(1, current_iteration)
         )
-        extra = _get_extra_fields(agent.name, "survey")
+        extra = _get_extra_fields(
+            agent.name, "survey", iteration=max(1, current_iteration)
+        )
         agent_context = (
             base_ctx if not extra else _augment_context(base_ctx, extra=extra)
         )
