@@ -35,10 +35,17 @@ The client itself :class:`CustomOAICompatibleClient` mirrors terrarium's
 ``FireworksClient`` byte-for-byte apart from ``__init__`` (it resolves the base
 URL / API key from ``OAI_COMPATIBLE_BASE_URL`` / ``OAI_COMPATIBLE_PROVIDER_KEY``
 instead of Fireworks-specific settings).
+
+This module also installs the blackboard-tools patch that lets a run suppress
+the ``post_message`` tool. That toggle is **task-local**: it is stored in a
+:class:`contextvars.ContextVar`, so the concurrent ``_run_single`` coroutines
+scheduled by a sweep (``max_concurrent_runs > 1``) each see their own value and
+can never clobber one another's restriction mid-round.
 """
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import random
@@ -373,18 +380,28 @@ def _install_generation_params_patch(_tu: Any) -> None:
 # ---------------------------------------------------------------------------
 # Blackboard tools patch (e.g. disabling post_message for tool-based collusion)
 # ---------------------------------------------------------------------------
-_POST_MESSAGE_DISABLED: bool = False
+# The flag is task-local, not process-global: a plain module-level bool would be
+# clobbered whenever two `_run_single` coroutines overlap under
+# `max_concurrent_runs > 1` (the last writer wins for every other in-flight run's
+# remaining turns). A ContextVar gives each asyncio task its own copy; child
+# tasks (and `copy_context().run(...)` at any thread boundary) inherit a snapshot.
+_POST_MESSAGE_DISABLED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "colosseum_post_message_disabled", default=False
+)
 
 
 def set_post_message_disabled(disabled: bool) -> None:
-    """Enable or disable the post_message tool globally."""
-    global _POST_MESSAGE_DISABLED
-    _POST_MESSAGE_DISABLED = bool(disabled)
+    """Enable or disable the post_message tool for the current task/context.
+
+    The value is scoped to the calling task's :mod:`contextvars` context, so
+    concurrent runs cannot interfere with each other.
+    """
+    _POST_MESSAGE_DISABLED.set(bool(disabled))
 
 
 def is_post_message_disabled() -> bool:
-    """Return whether the post_message tool is currently disabled."""
-    return _POST_MESSAGE_DISABLED
+    """Return whether post_message is disabled in the current task/context."""
+    return _POST_MESSAGE_DISABLED.get()
 
 
 def _install_blackboard_tools_patch() -> None:
