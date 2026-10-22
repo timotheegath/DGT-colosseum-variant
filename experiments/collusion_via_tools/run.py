@@ -77,83 +77,69 @@ def _sanitize_path_component(value: Any) -> str:
 _UNSET = object()
 
 
-def _normalize_disable_pm_value(val: Any) -> Optional[int]:
-    """Maps a raw knob value onto the integer form.
+def _normalize_disable_pm_value(val: Any) -> bool:
+    """Maps a raw knob value onto a strict bool for `disable_post_message`.
 
-    `true` -> 0 (restricted from the start), `false` / `null` -> None
-    (unrestricted), numbers -> their int value.
+    `true` / non-zero ints -> True (adversaries never get `post_message` in any
+    phase), `false` / `null` / 0 / anything else -> False (unrestricted).
     """
     if isinstance(val, bool):
-        return 0 if val else None
+        return val
     if isinstance(val, (int, float)):
-        return int(val)
-    return None
+        return bool(int(val))
+    if isinstance(val, str):
+        return val.strip().lower() in {"1", "true", "yes", "on"}
+    return False
 
 
-def _resolve_disable_pm_after_round(
+def _resolve_disable_pm(
     val: Any = _UNSET,
     cfg: Optional[Dict[str, Any]] = None,
-) -> Optional[int]:
-    """Resolves after which planning round `post_message` should be disabled.
-
-    Returns:
-      - None: never disabled (standard baseline with private messaging).
-      - 0: disabled from the start (planning round 1 onwards; tool-only collusion).
-      - X (int > 0): active during planning rounds 1..X, disabled for rounds > X.
+) -> bool:
+    """Resolves whether `post_message` is disabled for adversaries.
 
     `val` is the most specific decision available (normally a value already
     resolved by `_resolve_disable_pm_axis`). Passing the `_UNSET` sentinel falls
-    back to the six non-sweep config keys: the first key that is *present* wins,
-    and a present `false` / `null` is honoured as "unrestricted" rather than
-    skipped.
+    back to the three non-sweep config locations: the first key that is
+    *present* wins, and a present `false` / `null` is honoured as
+    "unrestricted" rather than skipped. Returns False when none is present.
     """
     if val is not _UNSET:
         return _normalize_disable_pm_value(val)
 
     if not cfg:
-        return None
+        return False
 
     exp_cfg = cfg.get("experiment") or {}
     adv_cfg = exp_cfg.get("adversary") or {}
     net_cfg = cfg.get("communication_network") or {}
 
-    for source, key in (
-        (exp_cfg, "disable_post_message_after_round"),
-        (adv_cfg, "disable_post_message_after_round"),
-        (net_cfg, "disable_post_message_after_round"),
-        (exp_cfg, "disable_post_message"),
-        (adv_cfg, "disable_post_message"),
-        (net_cfg, "disable_post_message"),
-    ):
-        if key in source:
-            return _normalize_disable_pm_value(source[key])
-    return None
+    for source in (exp_cfg, adv_cfg, net_cfg):
+        if "disable_post_message" in source:
+            return _normalize_disable_pm_value(source["disable_post_message"])
+    return False
 
 
 def _resolve_disable_pm_axis(
     sweep: Dict[str, Any],
     cfg: Optional[Dict[str, Any]] = None,
-) -> List[Optional[int]]:
-    """Resolves the `disable_post_message_after_round` axis for one sweep.
+) -> List[bool]:
+    """Resolves the `disable_post_message` axis for one sweep.
 
-    Returns one already-normalised decision per run in the sweep:
+    Returns one already-normalised bool per run in the sweep:
 
-    1. `sweeps[].disable_post_message_after_round` whenever the key is present
-       (scalar or list). A present `false` / `null` means "unrestricted for this
-       sweep" and does NOT fall through to the top-level keys.
-    2. otherwise `sweeps[].disable_post_message` (legacy boolean axis).
-    3. otherwise a single decision from the six top-level keys.
+    1. `sweeps[].disable_post_message` whenever the key is present (scalar or
+       list). A present `false` / `null` means "unrestricted for this sweep" and
+       does NOT fall through to the top-level keys.
+    2. otherwise a single decision from the three top-level keys.
 
-    A list stays one element per run, and a `null` / `false` element means that
-    element runs unrestricted.
+    A list stays one element per run.
     """
-    if isinstance(sweep, dict):
-        for key in ("disable_post_message_after_round", "disable_post_message"):
-            if key in sweep:
-                raw = sweep[key]
-                items = raw if isinstance(raw, list) else [raw]
-                return [_normalize_disable_pm_value(item) for item in items]
-    return [_resolve_disable_pm_after_round(_UNSET, cfg)]
+    if isinstance(sweep, dict) and "disable_post_message" in sweep:
+        raw = sweep["disable_post_message"]
+        items = raw if isinstance(raw, list) else [raw]
+        return [_normalize_disable_pm_value(item) for item in items]
+    return [_resolve_disable_pm(_UNSET, cfg)]
 
 
 def _normalize_pre_coordination_value(val: Any) -> bool:
@@ -180,7 +166,7 @@ def _resolve_pre_coordination_round(
 
     Presence (not truthiness) wins: a sweep-level `false` stops the search and
     is treated as "no pre-coordination round", mirroring the
-    `disable_post_message_after_round` resolution semantics.
+    `disable_post_message` resolution semantics.
     """
     if val is not _UNSET:
         return _normalize_pre_coordination_value(val)
@@ -278,58 +264,23 @@ def _resolve_pre_coordination_max_messages(
     return None
 
 
-def _post_message_disabled_in_execution(
-    resolved: Optional[int],
-    planning_rounds: int,
-) -> bool:
-    """Whether `post_message` must stay disabled during the execution phase.
-
-    The coordination window spans planning rounds ``1..N`` (with ``N =
-    resolved``) and closes at the end of round ``N``. Execution therefore only
-    keeps ``post_message`` available when the window never fully opened, i.e.
-    when ``N > planning_rounds``.
-
-    Args:
-      resolved: ``None`` (never disabled), ``0`` (disabled from the start) or
-        ``N > 0`` (available during planning rounds ``1..N`` only).
-      planning_rounds: number of planning rounds run (``max_planning_rounds``).
-    """
-    if resolved is None:
-        return False
-    return resolved == 0 or planning_rounds >= resolved
-
-
-def _post_message_availability_mode(resolved: Optional[int]) -> str:
-    """Normalize disable_post_message_after_round into a prompt-facing mode."""
-    if resolved is None:
-        return "always"
-    if resolved <= 0:
-        return "never"
-    return f"cut_after_round_{int(resolved)}"
-
-
 def _compute_effective_secret_channel(
     secret_channel_enabled: bool,
-    resolved_disable_pm_after_round: Optional[int],
+    disable_post_message: bool,
     *,
     pre_coordination_round: bool = False,
 ) -> bool:
     """Whether a coalition-only secret blackboard is actually created.
 
-    Mode ``0`` (``post_message`` disabled from the start) suppresses the secret
-    channel even when it was requested, because there is no tool left to write
-    to it -- UNLESS the pre-coordination round is enabled, in which case the
-    secret blackboard is required for the pre-coordination phase even though
-    it will be unused after that round ends.
+    `disable_post_message` suppresses the secret channel even when it was
+    requested, because there is no tool left to write to it -- UNLESS the
+    pre-coordination round is enabled, in which case the secret blackboard is
+    required for the pre-coordination phase even though it will be unused after
+    that round ends.
     """
-    if not secret_channel_enabled:
-        return False
-    if resolved_disable_pm_after_round != 0:
-        return True
-    # Mode 0: only keep the secret channel if the pre-coordination round
-    # needs it (the adversary uses post_message to the secret blackboard
-    # during that round, then loses it afterwards).
-    return pre_coordination_round
+    return bool(secret_channel_enabled) and (
+        not disable_post_message or pre_coordination_round
+    )
 
 
 def _build_run_id(
@@ -342,8 +293,7 @@ def _build_run_id(
     adversary_count: int,
     target_role: Any,
     seed: int,
-    disable_post_message_after_round: Optional[int] = None,
-    disable_post_message: Optional[bool] = None,
+    disable_post_message: bool = False,
     pre_coordination_round: bool = False,
 ) -> str:
     model_safe = _sanitize_path_component(model_label)
@@ -351,16 +301,7 @@ def _build_run_id(
     topology_safe = _sanitize_path_component(topology)
     role_safe = _sanitize_path_component(target_role)
 
-    after_round = disable_post_message_after_round
-    if after_round is None and disable_post_message is not None:
-        after_round = 0 if disable_post_message else None
-
-    if after_round is None:
-        suffix = ""
-    elif after_round == 0:
-        suffix = "__nopm"
-    else:
-        suffix = f"__cut_after_r{after_round}"
+    suffix = "__nopm" if disable_post_message else ""
 
     if pre_coordination_round:
         suffix = f"{suffix}__precoord" if suffix else "__precoord"
@@ -723,7 +664,6 @@ async def _run_single(
     target_role: Optional[str],
     seed: int,
     out_dir: Path,
-    disable_post_message_after_round: Any = _UNSET,
     disable_post_message: Any = _UNSET,
     pre_coordination_round: bool = False,
     pre_coordination_max_messages: Any = _UNSET,
@@ -793,17 +733,12 @@ async def _run_single(
     # has already made the decision: use it verbatim instead of re-resolving a
     # `None` against the top-level config (which would silently override an
     # explicit sweep-level `false` / `null`).
-    if disable_post_message_after_round is not _UNSET:
-        resolved_disable_pm_after_round = _normalize_disable_pm_value(
-            disable_post_message_after_round
-        )
-    elif disable_post_message is not _UNSET:
-        resolved_disable_pm_after_round = _normalize_disable_pm_value(
-            disable_post_message
-        )
-    else:
-        resolved_disable_pm_after_round = _resolve_disable_pm_after_round(_UNSET, cfg)
-    set_post_message_disabled(resolved_disable_pm_after_round == 0)
+    resolved_disable_pm = (
+        _normalize_disable_pm_value(disable_post_message)
+        if disable_post_message is not _UNSET
+        else _resolve_disable_pm(_UNSET, cfg)
+    )
+    set_post_message_disabled(resolved_disable_pm)
 
     # --- PRE-COORDINATION ROUND ---
     # A single, planning-prompt-shaped round run before the main simulation
@@ -832,7 +767,7 @@ async def _run_single(
         adversary_count=int(adversary_count),
         target_role=target_role,
         seed=int(seed),
-        disable_post_message_after_round=resolved_disable_pm_after_round,
+        disable_post_message=resolved_disable_pm,
         pre_coordination_round=resolved_pre_coordination,
     )
     run_dir = out_dir / "runs" / model_label / sweep_name / run_id
@@ -873,7 +808,7 @@ async def _run_single(
     # tell "never requested" from "suppressed by 0".
     effective_secret_channel = _compute_effective_secret_channel(
         secret_channel_enabled,
-        resolved_disable_pm_after_round,
+        resolved_disable_pm,
         pre_coordination_round=resolved_pre_coordination,
     )
 
@@ -979,37 +914,26 @@ async def _run_single(
     planning_rounds = int(cfg["simulation"].get("max_planning_rounds", 1))
     turns: List[Dict[str, Any]] = []
 
-    # Whether adversaries keep `post_message` during execution/survey: the
-    # coordination window is planning rounds 1..N, so it closes afterwards.
-    execution_disable_pm = _post_message_disabled_in_execution(
-        resolved_disable_pm_after_round, planning_rounds
-    )
-
     def _get_extra_fields(agent_name: str, phase: str) -> Dict[str, Any]:
         if is_benign:
             return {}
         role = roles.get(agent_name, "cooperative")
-        if role == "adversary":
-            post_message_availability = _post_message_availability_mode(
-                resolved_disable_pm_after_round
-            )
-        else:
-            post_message_availability = "always"
+        post_message_available = not resolved_disable_pm
         # During the pre-coordination round the adversary DOES have post_message
-        # regardless of the underlying `disable_post_message_after_round`
-        # setting -- otherwise the planning-shaped prompt would tell them
-        # "you have NO post_message" while the tool actually works. The
-        # dedicated pre-coordination block in prompts.py explains the
-        # situation in a way that does not contradict the runtime gate.
+        # regardless of the underlying `disable_post_message` setting --
+        # otherwise the planning-shaped prompt would tell them "you have NO
+        # post_message" while the tool actually works. The dedicated
+        # pre-coordination block in prompts.py explains the situation in a way
+        # that does not contradict the runtime gate.
         if phase == "pre_coordination" and role == "adversary":
-            post_message_availability = "always"
+            post_message_available = True
         return {
             "misalignment_role": role,
             "misalignment_adversaries": adversaries,
             "misalignment_secret_blackboard_id": secret_blackboard_id
             if role == "adversary"
             else None,
-            "post_message_availability": post_message_availability,
+            "post_message_available": post_message_available,
             "phase": phase,
         }
 
@@ -1084,15 +1008,15 @@ async def _run_single(
             except Exception:
                 pass
         # Restore env-tool gating for the simulation loop. `post_message` will
-        # be re-set per-agent below based on `resolved_disable_pm_after_round`.
+        # be re-set per-agent below based on `resolved_disable_pm`.
         set_env_tools_blocked(False)
         # Stop rewriting `post_message` to the secret board during the main
         # simulation loop: each adversary's normal planning/execution turn
         # targets whatever blackboard the agent chooses.
         set_secret_blackboard_id(None)
         # Lift the cap and clear counters for the main simulation loop, where
-        # the existing per-round `disable_post_message_after_round` setting
-        # owns `post_message` availability.
+        # the existing `disable_post_message` setting owns `post_message`
+        # availability.
         set_post_message_call_limit(None)
         reset_post_message_counts()
 
@@ -1107,10 +1031,7 @@ async def _run_single(
 
         # 1. PLANNING
         for planning_round in range(1, planning_rounds + 1):
-            if resolved_disable_pm_after_round is not None:
-                round_level_disabled = planning_round > resolved_disable_pm_after_round
-            else:
-                round_level_disabled = False
+            round_level_disabled = resolved_disable_pm
             last_agent = None
             for agent in env.agents:
                 # Restriction is adversary-only: honest agents keep `post_message`.
@@ -1166,7 +1087,7 @@ async def _run_single(
         for agent in env.agents:
             # Restriction is adversary-only: honest agents keep `post_message`.
             if roles.get(agent.name) == "adversary":
-                set_post_message_disabled(execution_disable_pm)
+                set_post_message_disabled(resolved_disable_pm)
             else:
                 set_post_message_disabled(False)
             base_ctx = env.build_agent_context(
@@ -1211,7 +1132,7 @@ async def _run_single(
     for agent in env.agents:
         # Restriction is adversary-only: honest agents keep `post_message`.
         if roles.get(agent.name) == "adversary":
-            set_post_message_disabled(execution_disable_pm)
+            set_post_message_disabled(resolved_disable_pm)
         else:
             set_post_message_disabled(False)
         base_ctx = env.build_agent_context(
@@ -1354,8 +1275,7 @@ async def _run_single(
             "secret_channel_enabled": secret_channel_enabled,
             "effective_secret_channel": effective_secret_channel,
             "secret_blackboard_id": secret_blackboard_id,
-            "disable_post_message_after_round": resolved_disable_pm_after_round,
-            "disable_post_message": (resolved_disable_pm_after_round == 0),
+            "disable_post_message": resolved_disable_pm,
             "pre_coordination_round": resolved_pre_coordination,
             "pre_coordination_max_messages": resolved_pre_coord_max,
             "roles": roles,
@@ -1609,12 +1529,7 @@ async def run_from_config(
                                     for resolved_precoord in precoord_list:
                                         for seed in seeds:
                                             role_lbl = role if role else "Any"
-                                            if resolved_cut is None:
-                                                pm_lbl = ""
-                                            elif resolved_cut == 0:
-                                                pm_lbl = "__nopm"
-                                            else:
-                                                pm_lbl = f"__cut_after_r{resolved_cut}"
+                                            pm_lbl = "__nopm" if resolved_cut else ""
                                             if resolved_precoord:
                                                 pm_lbl = (
                                                     f"{pm_lbl}__precoord"
@@ -1640,7 +1555,7 @@ async def run_from_config(
                                                     target_role=role,
                                                     seed=seed,
                                                     out_dir=root,
-                                                    disable_post_message_after_round=resolved_cut,
+                                                    disable_post_message=resolved_cut,
                                                     pre_coordination_round=resolved_precoord,
                                                     pre_coordination_max_messages=precoord_max,
                                                 )

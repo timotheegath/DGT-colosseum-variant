@@ -1,4 +1,4 @@
-"""Precedence tests for the `disable_post_message_after_round` knob.
+"""Precedence tests for the boolean `disable_post_message` knob.
 
 Stdlib `unittest` only: no new dependencies, no network, no LLM calls. The
 counting-pass test stubs out `_run_single` so `run_from_config` exercises only
@@ -27,7 +27,7 @@ def _one(sweep, cfg):
     return axis[0]
 
 
-def _run_id(cut):
+def _run_id(disable_post_message):
     """The sweep-independent prefix of a run_id, with the given suffix."""
     return run_mod._build_run_id(
         model_label="m",
@@ -38,114 +38,103 @@ def _run_id(cut):
         adversary_count=1,
         target_role=None,
         seed=1,
-        disable_post_message_after_round=cut,
+        disable_post_message=disable_post_message,
     )
 
 
 class DisablePmPrecedenceTests(unittest.TestCase):
-    def test_sweep_false_overrides_top_level_cut(self):
-        cfg = {"experiment": {"disable_post_message_after_round": 1}}
-        sweep = {"name": "s", "disable_post_message_after_round": False}
+    def test_unset_everywhere_is_unrestricted(self):
+        self.assertIs(_one({}, {}), False)
+        self.assertIs(_one({"name": "s"}, None), False)
 
-        cut = _one(sweep, cfg)
+    def test_top_level_experiment_key(self):
+        cfg = {"experiment": {"disable_post_message": True}}
 
-        self.assertIsNone(cut)
-        rid = _run_id(cut)
-        self.assertEqual(rid, _run_id(None))
-        self.assertNotIn("__nopm", rid)
-        self.assertNotIn("__cut_after_r", rid)
+        self.assertIs(_one({}, cfg), True)
+        self.assertEqual(_run_id(_one({}, cfg)), _run_id(True))
+        self.assertTrue(_run_id(_one({}, cfg)).endswith("__nopm"))
 
-    def test_sweep_zero_overrides_top_level_true(self):
-        cfg = {"experiment": {"disable_post_message_after_round": True}}
-        sweep = {"name": "s", "disable_post_message_after_round": 0}
+    def test_top_level_adversary_key_lives_under_experiment(self):
+        cfg = {"experiment": {"adversary": {"disable_post_message": True}}}
 
-        cut = _one(sweep, cfg)
+        self.assertIs(_one({}, cfg), True)
 
-        self.assertEqual(cut, 0)
-        self.assertEqual(_run_id(cut), _run_id(None) + "__nopm")
+    def test_top_level_communication_network_key(self):
+        cfg = {"communication_network": {"disable_post_message": True}}
 
-    def test_no_sweep_axis_uses_top_level_cut(self):
-        cfg = {"experiment": {"disable_post_message_after_round": 1}}
+        self.assertIs(_one({}, cfg), True)
 
-        cut = _one({"name": "s"}, cfg)
+    def test_top_level_documented_order(self):
+        # `experiment` beats `communication_network` (a present `experiment`
+        # value stops the walk even when a lower-precedence `true` disagrees).
+        cfg = {
+            "experiment": {"disable_post_message": True},
+            "communication_network": {"disable_post_message": False},
+        }
+        self.assertIs(_one({}, cfg), True)
 
-        self.assertEqual(cut, 1)
-        self.assertEqual(_run_id(cut), _run_id(None) + "__cut_after_r1")
+        # `experiment.adversary` beats `communication_network`.
+        cfg = {
+            "experiment": {"adversary": {"disable_post_message": False}},
+            "communication_network": {"disable_post_message": True},
+        }
+        self.assertIs(_one({}, cfg), False)
 
-    def test_list_axis_is_one_run_per_element(self):
-        axis = _axis(
-            {"name": "s", "disable_post_message_after_round": [None, 0, 1]}, {}
-        )
+        # Fallback all the way to `communication_network`.
+        cfg = {"communication_network": {"disable_post_message": True}}
+        self.assertIs(_one({}, cfg), True)
 
-        self.assertEqual(axis, [None, 0, 1])
-        self.assertEqual(
-            [_run_id(cut) for cut in axis],
-            [_run_id(None), _run_id(None) + "__nopm", _run_id(None) + "__cut_after_r1"],
-        )
-
-    def test_falsy_list_element_is_honoured_not_backfilled(self):
-        # A top-level restriction must not leak into `null` / `false` elements.
-        cfg = {"experiment": {"disable_post_message_after_round": 1}}
-        axis = _axis(
-            {"name": "s", "disable_post_message_after_round": [None, False, 1]}, cfg
-        )
-
-        self.assertEqual(axis, [None, None, 1])
-
-    def test_top_level_false_with_sweep_one(self):
-        cfg = {"experiment": {"disable_post_message": False}}
-        sweep = {"name": "s", "disable_post_message_after_round": 1}
-
-        cut = _one(sweep, cfg)
-
-        self.assertEqual(cut, 1)
-        self.assertEqual(_run_id(cut), _run_id(None) + "__cut_after_r1")
-
-    def test_sweep_after_round_key_beats_legacy_sweep_key(self):
-        sweep = {
-            "name": "s",
-            "disable_post_message_after_round": False,
-            "disable_post_message": True,
+    def test_top_level_present_false_stops_the_search(self):
+        cfg = {
+            "experiment": {"disable_post_message": False},
+            "communication_network": {"disable_post_message": True},
         }
 
-        self.assertIsNone(_one(sweep, {}))
-
-    def test_sweep_legacy_key_used_when_after_round_absent(self):
-        sweep = {"name": "s", "disable_post_message": 0}
-
-        self.assertEqual(_one(sweep, {}), 0)
+        self.assertIs(_one({}, cfg), False)
 
     def test_top_level_present_null_stops_the_search(self):
         cfg = {
-            "experiment": {
-                "disable_post_message_after_round": None,
-                "disable_post_message": True,
-            }
+            "experiment": {"disable_post_message": None},
+            "communication_network": {"disable_post_message": True},
         }
 
-        self.assertIsNone(_one({}, cfg))
+        self.assertIs(_one({}, cfg), False)
 
-    def test_top_level_documented_order(self):
-        cfg = {
-            "experiment": {
-                "disable_post_message_after_round": 1,
-                "adversary": {"disable_post_message_after_round": 2},
-                "disable_post_message": True,
-            },
-            "communication_network": {"disable_post_message_after_round": 3},
-        }
+    def test_sweep_false_overrides_top_level_true(self):
+        cfg = {"experiment": {"disable_post_message": True}}
+        sweep = {"name": "s", "disable_post_message": False}
 
-        self.assertEqual(_one({}, cfg), 1)
+        dpm = _one(sweep, cfg)
 
-        without_exp = {
-            "experiment": {"disable_post_message": True},
-            "communication_network": {"disable_post_message_after_round": 3},
-        }
-        self.assertEqual(_one({}, without_exp), 3)
+        self.assertIs(dpm, False)
+        rid = _run_id(dpm)
+        self.assertEqual(rid, _run_id(False))
+        self.assertNotIn("__nopm", rid)
 
-    def test_unset_everywhere_is_unrestricted(self):
-        self.assertIsNone(_one({}, {}))
-        self.assertIsNone(_one({"name": "s"}, None))
+    def test_sweep_true_overrides_top_level_false(self):
+        cfg = {"experiment": {"disable_post_message": False}}
+        sweep = {"name": "s", "disable_post_message": True}
+
+        dpm = _one(sweep, cfg)
+
+        self.assertIs(dpm, True)
+        self.assertEqual(_run_id(dpm), _run_id(False) + "__nopm")
+
+    def test_list_axis_is_one_run_per_element(self):
+        axis = _axis({"name": "s", "disable_post_message": [True, False]}, {})
+
+        self.assertEqual(axis, [True, False])
+        self.assertEqual(
+            [_run_id(dpm) for dpm in axis],
+            [_run_id(False) + "__nopm", _run_id(False)],
+        )
+
+    def test_falsy_list_element_is_honoured_not_backfilled(self):
+        # A top-level restriction must not leak into a `false` element.
+        cfg = {"experiment": {"disable_post_message": True}}
+        axis = _axis({"name": "s", "disable_post_message": [True, False]}, cfg)
+
+        self.assertEqual(axis, [True, False])
 
 
 class CountingPassTests(unittest.TestCase):
@@ -170,7 +159,7 @@ class CountingPassTests(unittest.TestCase):
                             "name": "sw",
                             "topologies": ["complete", "ring"],
                             "num_agents": [9, 13],
-                            "disable_post_message_after_round": [None, 0, 1],
+                            "disable_post_message": [True, False],
                         }
                     ],
                 },
@@ -179,10 +168,10 @@ class CountingPassTests(unittest.TestCase):
             cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
             progress: list = []
-            seen_cuts: list = []
+            seen_dpm: list = []
 
             async def _stub(**kwargs):
-                seen_cuts.append(kwargs.get("disable_post_message_after_round"))
+                seen_dpm.append(kwargs.get("disable_post_message"))
                 return {"run_id": "stub"}
 
             orig_progress = run_mod._write_progress
@@ -197,20 +186,17 @@ class CountingPassTests(unittest.TestCase):
                 run_mod._write_progress = orig_progress
                 run_mod._run_single = orig_single
 
-            axis_len = 3
+            axis_len = 2
             feasible = 2 * 2  # topologies x num_agents (non-hospital: all feasible)
             expected = axis_len * feasible * len(cfg["experiment"]["seeds"])
 
             self.assertEqual(progress[0]["total_runs"], expected)
-            self.assertEqual(progress[0]["total_runs"], len(seen_cuts))
+            self.assertEqual(progress[0]["total_runs"], len(seen_dpm))
             self.assertEqual(
-                seen_cuts.count(None), feasible * len(cfg["experiment"]["seeds"])
+                seen_dpm.count(True), feasible * len(cfg["experiment"]["seeds"])
             )
             self.assertEqual(
-                seen_cuts.count(0), feasible * len(cfg["experiment"]["seeds"])
-            )
-            self.assertEqual(
-                seen_cuts.count(1), feasible * len(cfg["experiment"]["seeds"])
+                seen_dpm.count(False), feasible * len(cfg["experiment"]["seeds"])
             )
 
 

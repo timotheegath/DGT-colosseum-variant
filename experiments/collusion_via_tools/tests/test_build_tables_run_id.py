@@ -2,7 +2,7 @@
 
 Focus: ``_infer_run_fields`` must accept the post_message restriction suffixes
 emitted by ``collusion_via_tools.run._build_run_id`` (``__nopm`` and
-``__cut_after_r{N}``) while keeping the legacy ``__strat{...}`` form (without a
+``__precoord``) while keeping the legacy ``__strat{...}`` form (without a
 suffix) and the unsuffixed form parsing exactly as before.
 """
 
@@ -12,7 +12,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from experiments.collusion_via_tools.plots.build_tables import _infer_run_fields
+from experiments.collusion_via_tools.plots.build_tables import (
+    _RUN_ID_RE_V2,
+    _infer_run_fields,
+)
 
 # Base run_id template mirroring run._build_run_id (V2 form):
 #   {model}__{sweep}__topo{T}__agents{N}_patients{P}_adv{A}_{role}_seed{S}
@@ -42,20 +45,30 @@ class RunIdParsingTests(unittest.TestCase):
     def test_plain_unsuffixed_id(self) -> None:
         fields = _infer(BASE.format(role="Patient", suffix=""))
         self.assert_common_fields(fields, role="Patient")
-        self.assertIsNone(fields.get("disable_post_message_after_round"))
+        self.assertFalse(fields.get("disable_post_message"))
         self.assertFalse(fields.get("post_message_restricted"))
+        self.assertFalse(fields.get("pre_coordination_round"))
 
     def test_nopm_suffix(self) -> None:
         fields = _infer(BASE.format(role="Patient", suffix="__nopm"))
         self.assert_common_fields(fields, role="Patient")
-        self.assertEqual(fields.get("disable_post_message_after_round"), 0)
+        self.assertTrue(fields.get("disable_post_message"))
         self.assertTrue(fields.get("post_message_restricted"))
+        self.assertFalse(fields.get("pre_coordination_round"))
 
-    def test_cut_after_round_suffix(self) -> None:
-        fields = _infer(BASE.format(role="Patient", suffix="__cut_after_r3"))
+    def test_precoord_suffix(self) -> None:
+        fields = _infer(BASE.format(role="Patient", suffix="__precoord"))
         self.assert_common_fields(fields, role="Patient")
-        self.assertEqual(fields.get("disable_post_message_after_round"), 3)
+        self.assertFalse(fields.get("disable_post_message"))
+        self.assertFalse(fields.get("post_message_restricted"))
+        self.assertTrue(fields.get("pre_coordination_round"))
+
+    def test_nopm_precoord_combined_suffix(self) -> None:
+        fields = _infer(BASE.format(role="Patient", suffix="__nopm__precoord"))
+        self.assert_common_fields(fields, role="Patient")
+        self.assertTrue(fields.get("disable_post_message"))
         self.assertTrue(fields.get("post_message_restricted"))
+        self.assertTrue(fields.get("pre_coordination_round"))
 
     def test_legacy_strat_segment_without_suffix(self) -> None:
         run_id = (
@@ -64,20 +77,29 @@ class RunIdParsingTests(unittest.TestCase):
         )
         fields = _infer(run_id)
         self.assert_common_fields(fields, role="Patient")
-        self.assertIsNone(fields.get("disable_post_message_after_round"))
+        self.assertFalse(fields.get("disable_post_message"))
         self.assertFalse(fields.get("post_message_restricted"))
+        self.assertFalse(fields.get("pre_coordination_round"))
 
     def test_role_with_underscores_unsuffixed(self) -> None:
         fields = _infer(BASE.format(role="Resource_Provisioner", suffix=""))
         self.assert_common_fields(fields, role="Resource_Provisioner")
-        self.assertIsNone(fields.get("disable_post_message_after_round"))
+        self.assertFalse(fields.get("disable_post_message"))
 
     def test_role_with_underscores_suffixed(self) -> None:
-        fields = _infer(
-            BASE.format(role="Resource_Provisioner", suffix="__cut_after_r5")
-        )
+        fields = _infer(BASE.format(role="Resource_Provisioner", suffix="__nopm"))
         self.assert_common_fields(fields, role="Resource_Provisioner")
-        self.assertEqual(fields.get("disable_post_message_after_round"), 5)
+        self.assertTrue(fields.get("disable_post_message"))
+
+    def test_old_cut_after_round_suffix_no_longer_matches(self) -> None:
+        run_id = BASE.format(role="Patient", suffix="__cut_after_r1")
+        # The V2 regex intentionally drops the legacy `__cut_after_r{N}` suffix:
+        # old outputs are not supported any more.
+        self.assertIsNone(_RUN_ID_RE_V2.match(run_id))
+        fields = _infer(run_id)
+        self.assertIsNone(fields.get("disable_post_message"))
+        self.assertIsNone(fields.get("post_message_restricted"))
+        self.assertIsNone(fields.get("pre_coordination_round"))
 
     def test_v1_id_still_parses_without_suffix_fields(self) -> None:
         # V1 form (run._build_run_id_v1): no topo/patients segment, no suffix.
@@ -89,8 +111,9 @@ class RunIdParsingTests(unittest.TestCase):
         self.assertEqual(fields.get("adversary_count"), 2)
         self.assertEqual(fields.get("target_role"), "Resource_Provisioner")
         self.assertEqual(fields.get("seed"), 7)
-        self.assertIsNone(fields.get("disable_post_message_after_round"))
+        self.assertFalse(fields.get("disable_post_message"))
         self.assertFalse(fields.get("post_message_restricted"))
+        self.assertFalse(fields.get("pre_coordination_round"))
 
 
 if __name__ == "__main__":

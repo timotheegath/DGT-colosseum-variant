@@ -42,7 +42,7 @@ class RunSpec:
     adversary_count: int
     target_role: Any
     seed: int
-    disable_post_message_after_round: Optional[int] = None
+    disable_post_message: bool = False
     pre_coordination_round: bool = False
     pre_coordination_max_messages: Optional[int] = None
 
@@ -57,7 +57,7 @@ class RunSpec:
             adversary_count=self.adversary_count,
             target_role=self.target_role,
             seed=self.seed,
-            disable_post_message_after_round=self.disable_post_message_after_round,
+            disable_post_message=self.disable_post_message,
             pre_coordination_round=self.pre_coordination_round,
         )
 
@@ -141,7 +141,7 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
             # run. Re-resolving its values here would send a sweep-level
             # `false` back through the config-reading path and yield run_ids
             # the runner never creates.
-            resolved_cuts = run_mod._resolve_disable_pm_axis(sweep, cfg)
+            resolved_dpm_list = run_mod._resolve_disable_pm_axis(sweep, cfg)
             resolved_precoord = run_mod._resolve_pre_coordination_axis(sweep, cfg)
             resolved_precoord_max = run_mod._resolve_pre_coordination_max_messages(
                 sweep, cfg
@@ -152,7 +152,7 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
                     for a in adversary_counts:
                         for role in target_roles:
                             for num_patients in patient_counts:
-                                for resolved_cut in resolved_cuts:
+                                for resolved_dpm in resolved_dpm_list:
                                     for precoord in resolved_precoord:
                                         for seed in seeds:
                                             yield RunSpec(
@@ -170,9 +170,7 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
                                                 adversary_count=int(a),
                                                 target_role=role,
                                                 seed=int(seed),
-                                                disable_post_message_after_round=(
-                                                    resolved_cut
-                                                ),
+                                                disable_post_message=resolved_dpm,
                                                 pre_coordination_round=precoord,
                                                 pre_coordination_max_messages=resolved_precoord_max,
                                             )
@@ -282,9 +280,7 @@ async def resume_runs(
                         target_role=spec.target_role,
                         seed=spec.seed,
                         out_dir=root,
-                        disable_post_message_after_round=(
-                            spec.disable_post_message_after_round
-                        ),
+                        disable_post_message=spec.disable_post_message,
                         pre_coordination_round=spec.pre_coordination_round,
                         pre_coordination_max_messages=(
                             spec.pre_coordination_max_messages
@@ -332,9 +328,7 @@ async def resume_runs(
                         target_role=spec.target_role,
                         seed=spec.seed,
                         out_dir=root,
-                        disable_post_message_after_round=(
-                            spec.disable_post_message_after_round
-                        ),
+                        disable_post_message=spec.disable_post_message,
                         pre_coordination_round=spec.pre_coordination_round,
                         pre_coordination_max_messages=(
                             spec.pre_coordination_max_messages

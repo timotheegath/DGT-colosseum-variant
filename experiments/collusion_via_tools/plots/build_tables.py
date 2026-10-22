@@ -27,7 +27,7 @@ _RUN_ID_RE_V2 = re.compile(
     adv(?P<adversary_count>\d+)_                # advK
     (?P<target_role>.+?)_                       # target role (can include underscores)
     seed(?P<seed>\d+)                           # seedS
-    (?:__(?P<restriction>nopm|cut_after_r(?P<cut_after_round>\d+)))?  # post_message suffix
+    (?:__(?P<restriction>nopm))?               # post_message suffix (__nopm)
     (?P<precoord>__precoord)?$                  # optional pre_coordination_round flag
     """,
     re.VERBOSE,
@@ -67,13 +67,10 @@ def _infer_run_fields(run_dir: Path, run_config: Dict[str, Any]) -> Dict[str, An
     m = _RUN_ID_RE_V2.match(rid) or _RUN_ID_RE_V1.match(rid)
     if m:
         groups = m.groupdict()
-        restriction = groups.get("restriction")
-        if restriction is None:
-            disable_post_message_after_round = None
-        elif restriction == "nopm":
-            disable_post_message_after_round = 0
-        else:
-            disable_post_message_after_round = as_int(groups.get("cut_after_round"))
+        # Post-message restriction is a plain boolean: `__nopm` present means
+        # `disable_post_message: true`. V1 ids (no suffix group) resolve to
+        # False (unrestricted).
+        disable_post_message = groups.get("restriction") is not None
         requested_num_agents = as_int(m.group("num_agents"))
         requested_adversary_count = as_int(m.group("adversary_count"))
         out.update(
@@ -86,13 +83,11 @@ def _infer_run_fields(run_dir: Path, run_config: Dict[str, Any]) -> Dict[str, An
                 "requested_adversary_count": requested_adversary_count,
                 "target_role": m.group("target_role"),
                 "seed": as_int(m.group("seed")),
-                # Post-message restriction suffix: None unrestricted, 0 for
-                # __nopm, N for __cut_after_r{N}. V1 ids (no suffix group)
-                # resolve to None.
-                "disable_post_message_after_round": disable_post_message_after_round,
-                "post_message_restricted": disable_post_message_after_round is not None,
+                # Boolean `__nopm` suffix.
+                "disable_post_message": disable_post_message,
+                "post_message_restricted": disable_post_message,
                 # Pre-coordination round: True when `__precoord` is present in
-                # the run id (may combine with any post-message suffix).
+                # the run id (may combine with the post-message suffix).
                 "pre_coordination_round": groups.get("precoord") is not None,
             }
         )
@@ -177,9 +172,7 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
                 "actual_adversary_count": inferred.get("actual_adversary_count"),
                 "target_role": inferred.get("target_role"),
                 "seed": inferred.get("seed"),
-                "disable_post_message_after_round": inferred.get(
-                    "disable_post_message_after_round"
-                ),
+                "disable_post_message": inferred.get("disable_post_message"),
                 "post_message_restricted": inferred.get("post_message_restricted"),
                 "pre_coordination_round": inferred.get("pre_coordination_round"),
                 "status": fs.get("status"),

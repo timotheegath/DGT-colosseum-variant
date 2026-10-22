@@ -10,7 +10,7 @@ Three layers are tested in isolation:
 
 1. Resolution: `_normalize_pre_coordination_value`, `_resolve_pre_coordination_round`,
    `_resolve_pre_coordination_axis` -- same precedence semantics as
-   `disable_post_message_after_round` (presence wins over fall-through).
+   `disable_post_message` (presence wins over fall-through).
 2. `run_id` suffixing: `_build_run_id` produces `__precoord` either alone or
    after the existing post-message suffix.
 3. Tool blocking: `LocalCommunicationProtocol.environment_handle_tool_call`
@@ -125,29 +125,24 @@ class BuildRunIdSuffixTests(unittest.TestCase):
         rid = run_mod._build_run_id(**self.BASE_KW, pre_coordination_round=True)
         self.assertTrue(rid.endswith("__precoord"))
 
-    def test_precoord_with_cut_after_r1(self) -> None:
-        rid = run_mod._build_run_id(
-            **self.BASE_KW,
-            disable_post_message_after_round=1,
-            pre_coordination_round=True,
-        )
-        self.assertTrue(rid.endswith("__cut_after_r1__precoord"))
-
     def test_precoord_with_nopm(self) -> None:
         rid = run_mod._build_run_id(
             **self.BASE_KW,
-            disable_post_message_after_round=0,
+            disable_post_message=True,
             pre_coordination_round=True,
         )
         self.assertTrue(rid.endswith("__nopm__precoord"))
 
+    def test_nopm_alone(self) -> None:
+        rid = run_mod._build_run_id(**self.BASE_KW, disable_post_message=True)
+        self.assertTrue(rid.endswith("__nopm"))
+        self.assertFalse("__precoord" in rid)
+
     def test_precoord_false_does_not_change_id(self) -> None:
-        rid_a = run_mod._build_run_id(
-            **self.BASE_KW, disable_post_message_after_round=1
-        )
+        rid_a = run_mod._build_run_id(**self.BASE_KW, disable_post_message=True)
         rid_b = run_mod._build_run_id(
             **self.BASE_KW,
-            disable_post_message_after_round=1,
+            disable_post_message=True,
             pre_coordination_round=False,
         )
         self.assertEqual(rid_a, rid_b)
@@ -162,14 +157,22 @@ class BuildTablesRegexTests(unittest.TestCase):
         self.assertEqual(m.group("precoord"), "__precoord")
         self.assertIsNone(m.group("restriction"))
 
-    def test_precoord_with_cut_after_r1(self) -> None:
+    def test_nopm_with_precoord(self) -> None:
+        m = bt._RUN_ID_RE_V2.match(
+            "m__s__topocomplete__agents9_patients8_adv2_Resource_Provisioner_seed1__nopm__precoord"
+        )
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("restriction"), "nopm")
+        self.assertEqual(m.group("precoord"), "__precoord")
+
+    def test_legacy_cut_after_r_suffix_no_longer_parses(self) -> None:
+        # The `disable_post_message_after_round: N` axis is gone, so old run
+        # ids intentionally stop parsing (they fall back to the directory
+        # heuristic in `_infer_run_fields`).
         m = bt._RUN_ID_RE_V2.match(
             "m__s__topocomplete__agents9_patients8_adv2_Resource_Provisioner_seed1__cut_after_r1__precoord"
         )
-        self.assertIsNotNone(m)
-        self.assertEqual(m.group("restriction"), "cut_after_r1")
-        self.assertEqual(m.group("cut_after_round"), "1")
-        self.assertEqual(m.group("precoord"), "__precoord")
+        self.assertIsNone(m)
 
     def test_no_suffix_round_trip(self) -> None:
         m = bt._RUN_ID_RE_V2.match(
@@ -200,32 +203,24 @@ class GetExtraFieldsPreCoordinationOverrideTests(unittest.TestCase):
         # the contract stays testable in isolation.
         role = "cooperative" if is_benign else "adversary"
         if role != "adversary":
-            return {"post_message_availability": "always", "phase": "pre_coordination"}
-        pm = run_mod._post_message_availability_mode(disable_pm)
-        if "pre_coordination" == "pre_coordination" and role == "adversary":
-            pm = "always"
-        return {"post_message_availability": pm, "phase": "pre_coordination"}
+            return {"post_message_available": True, "phase": "pre_coordination"}
+        pm = not bool(disable_pm)
+        if role == "adversary":  # pre-coordination override
+            pm = True
+        return {"post_message_available": pm, "phase": "pre_coordination"}
 
-    def test_pre_coordination_with_mode_zero_overrides_to_always(self) -> None:
-        # This is the bug we're guarding against: mode 0 ("never") would
-        # otherwise make the prompt say "you have NO post_message" while
-        # post_message actually works that turn.
-        self.assertEqual(self._build(0)["post_message_availability"], "always")
+    def test_pre_coordination_overrides_to_available(self) -> None:
+        # The bug we're guarding against: with `disable_post_message: true` the
+        # planning-shaped prompt would otherwise say "you have NO post_message"
+        # while post_message actually works that turn.
+        self.assertIs(self._build(True)["post_message_available"], True)
 
-    def test_pre_coordination_with_mode_one_overrides_to_always(self) -> None:
-        # cut_after_round_1 is also fine to override -- the prompt already
-        # tells them this is their only round via the dedicated block.
-        self.assertEqual(self._build(1)["post_message_availability"], "always")
+    def test_pre_coordination_available_when_not_disabled(self) -> None:
+        self.assertIs(self._build(False)["post_message_available"], True)
 
-    def test_pre_coordination_with_mode_null_overrides_to_always(self) -> None:
-        self.assertEqual(self._build(None)["post_message_availability"], "always")
-
-    def test_cooperative_agent_is_always(self) -> None:
-        # Sanity: the override must not flip honest agents to "never".
-        self.assertEqual(
-            self._build(0, is_benign=True)["post_message_availability"],
-            "always",
-        )
+    def test_cooperative_agent_is_available(self) -> None:
+        # Sanity: the override must not flip honest agents to False.
+        self.assertIs(self._build(True, is_benign=True)["post_message_available"], True)
 
 
 class EnvToolsBlockStubTests(unittest.TestCase):
@@ -536,36 +531,37 @@ class SecretBlackboardIdContextVarTests(unittest.TestCase):
 
 
 class EffectiveSecretChannelPreCoordTests(unittest.TestCase):
-    """Mode 0 (`post_message` disabled from the start) must still create the
-    secret blackboard when the pre-coordination round is enabled -- otherwise
-    the adversary leaks the coordination scheme to the public board.
+    """``disable_post_message: true`` must still create the secret blackboard
+    when the pre-coordination round is enabled -- otherwise the adversary
+    leaks the coordination scheme to the public board.
     """
 
-    def test_mode0_with_precoord_creates_secret_board(self) -> None:
+    def test_disabled_with_precoord_creates_secret_board(self) -> None:
         self.assertTrue(
             run_mod._compute_effective_secret_channel(
                 secret_channel_enabled=True,
-                resolved_disable_pm_after_round=0,
+                disable_post_message=True,
                 pre_coordination_round=True,
             )
         )
 
-    def test_mode0_without_precoord_still_suppresses_secret_board(self) -> None:
+    def test_disabled_without_precoord_suppresses_secret_board(self) -> None:
         self.assertFalse(
             run_mod._compute_effective_secret_channel(
                 secret_channel_enabled=True,
-                resolved_disable_pm_after_round=0,
+                disable_post_message=True,
                 pre_coordination_round=False,
             )
         )
 
-    def test_mode_positive_always_creates_secret_board(self) -> None:
-        for mode in (1, 2, None):
-            with self.subTest(mode=mode):
+    def test_enabled_always_creates_secret_board(self) -> None:
+        for precoord in (True, False):
+            with self.subTest(precoord=precoord):
                 self.assertTrue(
                     run_mod._compute_effective_secret_channel(
                         secret_channel_enabled=True,
-                        resolved_disable_pm_after_round=mode,
+                        disable_post_message=False,
+                        pre_coordination_round=precoord,
                     )
                 )
 
@@ -573,7 +569,7 @@ class EffectiveSecretChannelPreCoordTests(unittest.TestCase):
         self.assertFalse(
             run_mod._compute_effective_secret_channel(
                 secret_channel_enabled=False,
-                resolved_disable_pm_after_round=None,
+                disable_post_message=False,
                 pre_coordination_round=True,
             )
         )
