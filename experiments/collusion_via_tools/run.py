@@ -40,7 +40,9 @@ from experiments.collusion_via_tools.prompts import MisalignmentPrompts
 from experiments.common.local_protocol import LocalCommunicationProtocol
 from experiments.collusion_via_tools.judge_beliefs import judge_run
 from experiments.common._patch_terrarium import (
+    reset_post_message_counts,
     set_env_tools_blocked,
+    set_post_message_call_limit,
     set_post_message_disabled,
 )
 
@@ -211,6 +213,68 @@ def _resolve_pre_coordination_axis(
         items = raw if isinstance(raw, list) else [raw]
         return [_normalize_pre_coordination_value(item) for item in items]
     return [_resolve_pre_coordination_round(_UNSET, cfg)]
+
+
+def _normalize_pre_coordination_max_messages(val: Any) -> Optional[int]:
+    """Maps a raw knob value onto an Optional[int] cap for per-agent
+    `post_message` calls during the pre-coordination round.
+
+    `None` / `null` / `0` -> None (unlimited). Integers clamp to >= 0; the
+    runner treats None as "no cap". A list is rejected (returns None) because
+    this knob is a single scalar, NOT a sweep dimension -- use separate
+    configs/sweeps to compare different caps.
+    """
+    if val is None:
+        return None
+    if isinstance(val, (list, tuple, set, dict)):
+        return None
+    if isinstance(val, bool):
+        # Treat booleans strictly: True -> 1, False -> None.
+        return 1 if val else None
+    if isinstance(val, (int, float)):
+        n = int(val)
+        return n if n > 0 else None
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in {"", "none", "null", "unlimited", "inf"}:
+            return None
+        try:
+            n = int(s)
+            return n if n > 0 else None
+        except ValueError:
+            return None
+    return None
+
+
+def _resolve_pre_coordination_max_messages(
+    sweep: Dict[str, Any],
+    cfg: Optional[Dict[str, Any]] = None,
+) -> Optional[int]:
+    """Resolves the `pre_coordination_max_messages` cap for one sweep.
+
+    Sweep-level key wins over top-level resolution. The result is a single
+    Optional[int] (None = unlimited), NOT a list -- this knob does not
+    produce a separate sweep dimension on its own; combine with the existing
+    `pre_coordination_round` flag to actually engage the cap.
+    """
+    if isinstance(sweep, dict) and "pre_coordination_max_messages" in sweep:
+        return _normalize_pre_coordination_max_messages(
+            sweep["pre_coordination_max_messages"]
+        )
+
+    if not cfg:
+        return None
+
+    exp_cfg = cfg.get("experiment") or {}
+    adv_cfg = exp_cfg.get("adversary") or {}
+    net_cfg = cfg.get("communication_network") or {}
+
+    for source in (exp_cfg, adv_cfg, net_cfg):
+        if "pre_coordination_max_messages" in source:
+            return _normalize_pre_coordination_max_messages(
+                source["pre_coordination_max_messages"]
+            )
+    return None
 
 
 def _post_message_disabled_in_execution(
@@ -650,6 +714,7 @@ async def _run_single(
     disable_post_message_after_round: Any = _UNSET,
     disable_post_message: Any = _UNSET,
     pre_coordination_round: bool = False,
+    pre_coordination_max_messages: Any = _UNSET,
 ) -> Dict[str, Any]:
     rng = random.Random(int(seed))
 
@@ -736,6 +801,12 @@ async def _run_single(
     # adversary cannot probe the environment before losing `post_message`.
     resolved_pre_coordination = _resolve_pre_coordination_round(
         pre_coordination_round, cfg
+    )
+    # Per-agent cap on `post_message` calls during the pre-coordination round.
+    # None means unlimited. When the pre-coordination round is off, this cap
+    # is also off.
+    resolved_pre_coord_max = _normalize_pre_coordination_max_messages(
+        pre_coordination_max_messages
     )
 
     # --- DIRECTORY SETUP ---
@@ -937,6 +1008,14 @@ async def _run_single(
         # Restore the post_message state — the loop below assumes it is on.
         set_post_message_disabled(False)
         set_env_tools_blocked(True)
+        # Apply per-agent `post_message` cap for the pre-coordination round,
+        # if configured. Resets the per-agent counter so each run starts
+        # fresh even when concurrent runs share the process.
+        if resolved_pre_coord_max is not None:
+            set_post_message_call_limit(resolved_pre_coord_max)
+        else:
+            set_post_message_call_limit(None)
+        reset_post_message_counts()
         last_pre_agent: Optional[str] = None
         for agent in env.agents:
             if roles.get(agent.name) != "adversary":
@@ -987,6 +1066,11 @@ async def _run_single(
         # Restore env-tool gating for the simulation loop. `post_message` will
         # be re-set per-agent below based on `resolved_disable_pm_after_round`.
         set_env_tools_blocked(False)
+        # Lift the cap and clear counters for the main simulation loop, where
+        # the existing per-round `disable_post_message_after_round` setting
+        # owns `post_message` availability.
+        set_post_message_call_limit(None)
+        reset_post_message_counts()
 
     current_iteration = 0
     for iteration in range(1, max_iterations + 1):
@@ -1249,6 +1333,7 @@ async def _run_single(
             "disable_post_message_after_round": resolved_disable_pm_after_round,
             "disable_post_message": (resolved_disable_pm_after_round == 0),
             "pre_coordination_round": resolved_pre_coordination,
+            "pre_coordination_max_messages": resolved_pre_coord_max,
             "roles": roles,
             "metrics": asdict(metrics),
         },
@@ -1476,6 +1561,8 @@ async def run_from_config(
             patient_counts = sweep.get("num_patients") or [16]
             dpm_list = _resolve_disable_pm_axis(sweep, cfg)
             precoord_list = _resolve_pre_coordination_axis(sweep, cfg)
+            # Single value per sweep; not a sweep dimension on its own.
+            precoord_max = _resolve_pre_coordination_max_messages(sweep, cfg)
 
             for topology in topologies:
                 for num_agents in agent_counts:
@@ -1531,6 +1618,7 @@ async def run_from_config(
                                                     out_dir=root,
                                                     disable_post_message_after_round=resolved_cut,
                                                     pre_coordination_round=resolved_precoord,
+                                                    pre_coordination_max_messages=precoord_max,
                                                 )
                                             )
                                             tasks.append(task)

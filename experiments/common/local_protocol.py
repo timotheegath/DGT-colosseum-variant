@@ -10,7 +10,12 @@ from terrarium.environment_tools import (
     instantiate_environment_tools,
 )
 
-from experiments.common._patch_terrarium import is_env_tools_blocked
+from experiments.common._patch_terrarium import (
+    get_post_message_call_limit,
+    get_post_message_count,
+    is_env_tools_blocked,
+    record_post_message_call,
+)
 
 
 @dataclass(slots=True)
@@ -263,6 +268,34 @@ class LocalCommunicationProtocol(BaseCommunicationProtocol):
         phase: Optional[str] = None,
         iteration: Optional[int] = None,
     ) -> Dict[str, Any]:
+        # Per-agent `post_message` cap (e.g. for the pre-coordination round).
+        # When the cap is set and the agent is over it, return a structured
+        # rejection so the agent can wrap up its coordination message.
+        if tool_name == "post_message":
+            limit = get_post_message_call_limit()
+            if limit is not None:
+                already = get_post_message_count(agent_name)
+                if already >= limit:
+                    rejection = {
+                        "result": None,
+                        "blocked": True,
+                        "reason": (
+                            f"post_message limit reached for this agent "
+                            f"({already}/{limit}); wrap up your coordination."
+                        ),
+                        "limit": limit,
+                        "count": already,
+                    }
+                    self._record_tool_event(
+                        tool_name=tool_name,
+                        agent_name=agent_name,
+                        arguments=arguments,
+                        result=rejection,
+                        phase=phase,
+                        iteration=iteration,
+                    )
+                    return rejection
+
         result = self.megaboard.handle_tool_call(
             tool_name,
             agent_name,
@@ -270,6 +303,8 @@ class LocalCommunicationProtocol(BaseCommunicationProtocol):
             phase=phase,
             iteration=iteration,
         )
+        if tool_name == "post_message":
+            record_post_message_call(agent_name)
         self._record_tool_event(
             tool_name=tool_name,
             agent_name=agent_name,

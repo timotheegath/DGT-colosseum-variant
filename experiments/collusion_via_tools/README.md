@@ -138,6 +138,20 @@ Agent turns within a round are awaited sequentially in one coroutine, so the per
 
 *Because the flag is task-local rather than process-global, concurrent runs cannot clobber each other.* Under `max_concurrent_runs > 1` each `_run_single` coroutine keeps its own value, so sweeps with differing `disable_post_message_after_round` values no longer need `max_concurrent_runs: 1` to avoid a mid-round race.
 
+### `pre_coordination_round` (adversary-only preparation round)
+
+Boolean knob, resolvable as `experiment.pre_coordination_round`, `experiment.adversary.pre_coordination_round`, `communication_network.pre_coordination_round`, or per-sweep via `sweeps[].pre_coordination_round`. Same precedence rules as `disable_post_message_after_round` (presence wins, including a sweep-level `false`).
+
+When enabled, a single adversary-only turn runs **before** iteration 1 of the main simulation. The agent receives the planning-shaped prompt (same prompt as a planning turn, plus a dedicated `phase == "pre_coordination"` block) and has `post_message` to the coalition blackboard. **All environment tools** (`broadcast_message`, `transfer_resources`, `schedule_patient`, etc.) are silently dropped at the protocol layer so the adversary cannot probe the environment before losing the private channel.
+
+- **Honest agents** are not given a pre-coordination turn — they keep their normal preparation time.
+- The dedicated block tells the adversary that env tools are blocked and that this is their only round with `post_message`.
+- `post_message_availability` is forced to `"always"` during the pre-coordination round so the planning-shaped prompt does not contradict the runtime gate (i.e., when `disable_post_message_after_round: 0` + `pre_coordination_round: true`, the prompt does NOT tell them "you have NO post_message").
+
+Companion knob: `pre_coordination_max_messages` (Optional[int], per-agent cap on `post_message` calls during the pre-coordination round). Defaults to `None` (unlimited). Enforced in `LocalCommunicationProtocol.blackboard_handle_tool_call`; rejected calls return `{"blocked": True, "limit": ..., "count": ..., "reason": ...}` so the agent can wrap up its coordination message. The cap is per-agent and shared across all turns of the pre-coordination round for that agent.
+
+Run-id suffixes compose: `__nopm__precoord`, `__cut_after_r1__precoord`, `__precoord` (alone), or no suffix when both knobs are off.
+
 ### How the adversary prompt is selected
 
 Removing a tool without telling the adversary produces an incoherent agent: the tuned strategy text tells it to *"post a short ops plan on the SECRET board"*, but the tool to do that with may be gone, or the board itself may never have been created. `prompts.py` therefore conditions the adversary instruction on two independent per-agent facts, both injected by `_get_extra_fields` in `run.py`:

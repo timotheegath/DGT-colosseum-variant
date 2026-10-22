@@ -295,5 +295,231 @@ class EnvToolsBlockStubTests(unittest.TestCase):
             pass
 
 
+class NormalizePreCoordinationMaxMessagesTests(unittest.TestCase):
+    def test_none_is_unlimited(self) -> None:
+        for v in (None, "null", "none", "unlimited", ""):
+            with self.subTest(v=v):
+                self.assertIsNone(run_mod._normalize_pre_coordination_max_messages(v))
+
+    def test_positive_int_is_clamped(self) -> None:
+        for v, expected in [(1, 1), (3, 3), (100, 100), ("5", 5)]:
+            with self.subTest(v=v):
+                self.assertEqual(
+                    run_mod._normalize_pre_coordination_max_messages(v), expected
+                )
+
+    def test_zero_is_unlimited(self) -> None:
+        # 0 is meaningless as a cap and is treated as "no cap" so existing
+        # configs that accidentally set 0 don't suddenly start rejecting all
+        # messages.
+        for v in (0, 0.0, "0"):
+            with self.subTest(v=v):
+                self.assertIsNone(run_mod._normalize_pre_coordination_max_messages(v))
+
+    def test_bool_meaning(self) -> None:
+        # True -> 1 message, False -> unlimited. Avoids accidentally
+        # interpreting `True` as a giant integer.
+        self.assertEqual(run_mod._normalize_pre_coordination_max_messages(True), 1)
+        self.assertIsNone(run_mod._normalize_pre_coordination_max_messages(False))
+
+    def test_garbage_falls_back_to_unlimited(self) -> None:
+        self.assertIsNone(run_mod._normalize_pre_coordination_max_messages("abc"))
+        self.assertIsNone(run_mod._normalize_pre_coordination_max_messages({}))
+
+
+class ResolvePreCoordinationMaxMessagesTests(unittest.TestCase):
+    def test_default_is_unlimited(self) -> None:
+        self.assertIsNone(run_mod._resolve_pre_coordination_max_messages({}, {}))
+
+    def test_sweep_value_wins(self) -> None:
+        sweep = {"pre_coordination_max_messages": 3}
+        cfg = {"experiment": {"pre_coordination_max_messages": 99}}
+        self.assertEqual(run_mod._resolve_pre_coordination_max_messages(sweep, cfg), 3)
+
+    def test_top_level_resolution(self) -> None:
+        cfg = {"experiment": {"pre_coordination_max_messages": 5}}
+        self.assertEqual(run_mod._resolve_pre_coordination_max_messages({}, cfg), 5)
+
+        cfg2 = {
+            "experiment": {
+                "adversary": {"pre_coordination_max_messages": 7},
+            }
+        }
+        self.assertEqual(run_mod._resolve_pre_coordination_max_messages({}, cfg2), 7)
+
+        cfg3 = {
+            "experiment": {},
+            "communication_network": {"pre_coordination_max_messages": 9},
+        }
+        self.assertEqual(run_mod._resolve_pre_coordination_max_messages({}, cfg3), 9)
+
+    def test_scalar_only(self) -> None:
+        # The max-messages knob must not introduce its own sweep dimension;
+        # a list is rejected (treated as "no cap") rather than silently taking
+        # the first element.
+        result = run_mod._resolve_pre_coordination_max_messages(
+            {"pre_coordination_max_messages": [1, 2, 3]}, {}
+        )
+        self.assertIsNone(result)
+
+
+class PostMessageCallLimitContextVarTests(unittest.TestCase):
+    def test_round_trip(self) -> None:
+        from experiments.common._patch_terrarium import (
+            get_post_message_call_limit,
+            set_post_message_call_limit,
+        )
+
+        self.assertIsNone(get_post_message_call_limit())
+        set_post_message_call_limit(5)
+        self.assertEqual(get_post_message_call_limit(), 5)
+        set_post_message_call_limit(None)
+        self.assertIsNone(get_post_message_call_limit())
+
+
+class PostMessageCountsContextVarTests(unittest.TestCase):
+    def test_round_trip(self) -> None:
+        from experiments.common._patch_terrarium import (
+            get_post_message_count,
+            record_post_message_call,
+            reset_post_message_counts,
+        )
+
+        reset_post_message_counts()
+        self.assertEqual(get_post_message_count("AgentA"), 0)
+        self.assertEqual(record_post_message_call("AgentA"), 1)
+        self.assertEqual(record_post_message_call("AgentA"), 2)
+        self.assertEqual(record_post_message_call("AgentB"), 1)
+        self.assertEqual(get_post_message_count("AgentA"), 2)
+        self.assertEqual(get_post_message_count("AgentB"), 1)
+        reset_post_message_counts()
+        self.assertEqual(get_post_message_count("AgentA"), 0)
+
+
+class BlackboardPostMessageCapTests(unittest.TestCase):
+    """End-to-end check: when the cap is set, the protocol rejects
+    `post_message` calls past the limit and accepts them up to it.
+    """
+
+    def _proto(self):
+        from experiments.common.local_protocol import LocalCommunicationProtocol
+        from terrarium.blackboard import Megaboard
+
+        proto = LocalCommunicationProtocol(config={})
+        proto.megaboard = Megaboard()
+
+        class _StubEnv:
+            pass
+
+        proto.environment = _StubEnv()
+        # `Megaboard.add_blackboard(agents, template)` is the constructor API.
+        bb_id = proto.megaboard.add_blackboard(["A", "B"])
+        return proto, bb_id
+
+    def test_post_message_capped(self) -> None:
+        from experiments.common._patch_terrarium import (
+            reset_post_message_counts,
+            set_post_message_call_limit,
+        )
+
+        reset_post_message_counts()
+        set_post_message_call_limit(2)
+        try:
+            proto, bb_id = self._proto()
+
+            async def _post_n(n):
+                results = []
+                for i in range(n):
+                    r = await proto.blackboard_handle_tool_call(
+                        tool_name="post_message",
+                        agent_name="A",
+                        arguments={"blackboard_id": bb_id, "message": f"m{i}"},
+                        phase="pre_coordination",
+                        iteration=0,
+                    )
+                    results.append(r)
+                return results
+
+            results = asyncio.run(_post_n(3))
+            # First two succeed; third is rejected.
+            self.assertFalse(bool(results[0].get("blocked")))
+            self.assertFalse(bool(results[1].get("blocked")))
+            self.assertTrue(bool(results[2].get("blocked")))
+            self.assertEqual(results[2].get("limit"), 2)
+            self.assertEqual(results[2].get("count"), 2)
+        finally:
+            set_post_message_call_limit(None)
+            reset_post_message_counts()
+
+    def test_unlimited_when_limit_none(self) -> None:
+        from experiments.common._patch_terrarium import (
+            reset_post_message_counts,
+            set_post_message_call_limit,
+        )
+
+        reset_post_message_counts()
+        set_post_message_call_limit(None)
+        proto, bb_id = self._proto()
+
+        async def _post_n(n):
+            results = []
+            for i in range(n):
+                r = await proto.blackboard_handle_tool_call(
+                    tool_name="post_message",
+                    agent_name="A",
+                    arguments={"blackboard_id": bb_id, "message": f"m{i}"},
+                )
+                results.append(r)
+            return results
+
+        results = asyncio.run(_post_n(5))
+        for r in results:
+            self.assertFalse(bool(r.get("blocked")))
+
+    def test_other_blackboard_tools_unaffected(self) -> None:
+        from experiments.common._patch_terrarium import (
+            reset_post_message_counts,
+            set_post_message_call_limit,
+        )
+
+        reset_post_message_counts()
+        set_post_message_call_limit(1)
+        try:
+            proto, bb_id = self._proto()
+
+            # All three calls must run inside ONE asyncio task: a ContextVar
+            # write inside a task is invisible to the parent context, so
+            # separate `asyncio.run` calls would each see a fresh counter.
+            async def _sequence():
+                r1 = await proto.blackboard_handle_tool_call(
+                    tool_name="post_message",
+                    agent_name="A",
+                    arguments={"blackboard_id": bb_id, "message": "hi"},
+                )
+                r2 = await proto.blackboard_handle_tool_call(
+                    tool_name="get_blackboard_events",
+                    agent_name="A",
+                    arguments={"blackboard_id": bb_id},
+                )
+                r3 = await proto.blackboard_handle_tool_call(
+                    tool_name="post_message",
+                    agent_name="A",
+                    arguments={"blackboard_id": bb_id, "message": "again"},
+                )
+                return r1, r2, r3
+
+            r1, r2, r3 = asyncio.run(_sequence())
+
+            # First post succeeds.
+            self.assertFalse(bool(r1.get("blocked")))
+            # Read-only tool must still work past the cap.
+            self.assertNotEqual(r2.get("blocked"), True)
+            # Second post is now blocked.
+            self.assertTrue(bool(r3.get("blocked")))
+        finally:
+            set_post_message_call_limit(None)
+            reset_post_message_counts()
+
+
 if __name__ == "__main__":
     unittest.main()

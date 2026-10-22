@@ -44,6 +44,7 @@ class RunSpec:
     seed: int
     disable_post_message_after_round: Optional[int] = None
     pre_coordination_round: bool = False
+    pre_coordination_max_messages: Optional[int] = None
 
     @property
     def run_id(self) -> str:
@@ -142,6 +143,9 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
             # the runner never creates.
             resolved_cuts = run_mod._resolve_disable_pm_axis(sweep, cfg)
             resolved_precoord = run_mod._resolve_pre_coordination_axis(sweep, cfg)
+            resolved_precoord_max = run_mod._resolve_pre_coordination_max_messages(
+                sweep, cfg
+            )
 
             for topology in topologies:
                 for n in agent_counts:
@@ -170,6 +174,7 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
                                                     resolved_cut
                                                 ),
                                                 pre_coordination_round=precoord,
+                                                pre_coordination_max_messages=resolved_precoord_max,
                                             )
 
 
@@ -281,6 +286,9 @@ async def resume_runs(
                             spec.disable_post_message_after_round
                         ),
                         pre_coordination_round=spec.pre_coordination_round,
+                        pre_coordination_max_messages=(
+                            spec.pre_coordination_max_messages
+                        ),
                     )
                     completed += 1
                 except Exception:
@@ -328,6 +336,9 @@ async def resume_runs(
                             spec.disable_post_message_after_round
                         ),
                         pre_coordination_round=spec.pre_coordination_round,
+                        pre_coordination_max_messages=(
+                            spec.pre_coordination_max_messages
+                        ),
                     )
 
             tasks = []

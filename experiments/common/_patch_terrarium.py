@@ -433,6 +433,63 @@ def is_env_tools_blocked() -> bool:
     return _ENV_TOOLS_BLOCKED.get()
 
 
+# ---------------------------------------------------------------------------
+# Per-agent `post_message` count cap (e.g. for the pre-coordination round).
+# Stores a dict mapping agent_name -> count of `post_message` invocations in
+# the current task's context. The caller (typically the experiment runner) is
+# responsible for resetting it at round boundaries.
+# ---------------------------------------------------------------------------
+_POST_MESSAGE_COUNTS: contextvars.ContextVar[Dict[str, int]] = contextvars.ContextVar(
+    "colosseum_post_message_counts", default={}
+)
+
+
+def reset_post_message_counts() -> None:
+    """Reset the per-agent `post_message` counter for the current context."""
+    _POST_MESSAGE_COUNTS.set({})
+
+
+def get_post_message_count(agent_name: str) -> int:
+    """Return how many times `agent_name` has called `post_message` in the
+    current context (this run / task / round, depending on what the caller
+    reset on)."""
+    return _POST_MESSAGE_COUNTS.get().get(agent_name, 0)
+
+
+def record_post_message_call(agent_name: str) -> int:
+    """Increment the counter and return the new value."""
+    counts = dict(_POST_MESSAGE_COUNTS.get())
+    counts[agent_name] = counts.get(agent_name, 0) + 1
+    _POST_MESSAGE_COUNTS.set(counts)
+    return counts[agent_name]
+
+
+# Per-task cap on `post_message` calls (None = unlimited). Used to throttle
+# the pre-coordination round so adversaries cannot flood the secret blackboard.
+# The counter (see `_POST_MESSAGE_COUNTS`) is keyed by agent_name so the limit
+# is enforced per-agent.
+_POST_MESSAGE_CALL_LIMIT: contextvars.ContextVar[Optional[int]] = (
+    contextvars.ContextVar("colosseum_post_message_call_limit", default=None)
+)
+
+
+def set_post_message_call_limit(limit: Optional[int]) -> None:
+    """Set the per-agent `post_message` cap for the current context.
+
+    ``None`` means unlimited. The limit is enforced in
+    :meth:`LocalCommunicationProtocol.blackboard_handle_tool_call`.
+    """
+    if limit is None:
+        _POST_MESSAGE_CALL_LIMIT.set(None)
+    else:
+        _POST_MESSAGE_CALL_LIMIT.set(int(limit))
+
+
+def get_post_message_call_limit() -> Optional[int]:
+    """Return the per-agent `post_message` cap (``None`` = unlimited)."""
+    return _POST_MESSAGE_CALL_LIMIT.get()
+
+
 def _install_blackboard_tools_patch() -> None:
     """Patch ToolsetDiscovery to allow disabling post_message dynamically."""
     try:
