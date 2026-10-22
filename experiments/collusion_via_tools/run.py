@@ -68,8 +68,24 @@ def _sanitize_path_component(value: Any) -> str:
     return s or "None"
 
 
+_UNSET = object()
+
+
+def _normalize_disable_pm_value(val: Any) -> Optional[int]:
+    """Maps a raw knob value onto the integer form.
+
+    `true` -> 0 (restricted from the start), `false` / `null` -> None
+    (unrestricted), numbers -> their int value.
+    """
+    if isinstance(val, bool):
+        return 0 if val else None
+    if isinstance(val, (int, float)):
+        return int(val)
+    return None
+
+
 def _resolve_disable_pm_after_round(
-    val: Any,
+    val: Any = _UNSET,
     cfg: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     """Resolves after which planning round `post_message` should be disabled.
@@ -78,13 +94,15 @@ def _resolve_disable_pm_after_round(
       - None: never disabled (standard baseline with private messaging).
       - 0: disabled from the start (planning round 1 onwards; tool-only collusion).
       - X (int > 0): active during planning rounds 1..X, disabled for rounds > X.
+
+    `val` is the most specific decision available (normally a value already
+    resolved by `_resolve_disable_pm_axis`). Passing the `_UNSET` sentinel falls
+    back to the six non-sweep config keys: the first key that is *present* wins,
+    and a present `false` / `null` is honoured as "unrestricted" rather than
+    skipped.
     """
-    if val is not None:
-        if isinstance(val, bool):
-            return 0 if val else None
-        if isinstance(val, (int, float)):
-            return int(val)
-        return None
+    if val is not _UNSET:
+        return _normalize_disable_pm_value(val)
 
     if not cfg:
         return None
@@ -93,20 +111,43 @@ def _resolve_disable_pm_after_round(
     adv_cfg = exp_cfg.get("adversary") or {}
     net_cfg = cfg.get("communication_network") or {}
 
-    for candidate in (
-        exp_cfg.get("disable_post_message_after_round"),
-        adv_cfg.get("disable_post_message_after_round"),
-        net_cfg.get("disable_post_message_after_round"),
-        exp_cfg.get("disable_post_message"),
-        adv_cfg.get("disable_post_message"),
-        net_cfg.get("disable_post_message"),
+    for source, key in (
+        (exp_cfg, "disable_post_message_after_round"),
+        (adv_cfg, "disable_post_message_after_round"),
+        (net_cfg, "disable_post_message_after_round"),
+        (exp_cfg, "disable_post_message"),
+        (adv_cfg, "disable_post_message"),
+        (net_cfg, "disable_post_message"),
     ):
-        if candidate is not None:
-            if isinstance(candidate, bool):
-                return 0 if candidate else None
-            if isinstance(candidate, (int, float)):
-                return int(candidate)
+        if key in source:
+            return _normalize_disable_pm_value(source[key])
     return None
+
+
+def _resolve_disable_pm_axis(
+    sweep: Dict[str, Any],
+    cfg: Optional[Dict[str, Any]] = None,
+) -> List[Optional[int]]:
+    """Resolves the `disable_post_message_after_round` axis for one sweep.
+
+    Returns one already-normalised decision per run in the sweep:
+
+    1. `sweeps[].disable_post_message_after_round` whenever the key is present
+       (scalar or list). A present `false` / `null` means "unrestricted for this
+       sweep" and does NOT fall through to the top-level keys.
+    2. otherwise `sweeps[].disable_post_message` (legacy boolean axis).
+    3. otherwise a single decision from the six top-level keys.
+
+    A list stays one element per run, and a `null` / `false` element means that
+    element runs unrestricted.
+    """
+    if isinstance(sweep, dict):
+        for key in ("disable_post_message_after_round", "disable_post_message"):
+            if key in sweep:
+                raw = sweep[key]
+                items = raw if isinstance(raw, list) else [raw]
+                return [_normalize_disable_pm_value(item) for item in items]
+    return [_resolve_disable_pm_after_round(_UNSET, cfg)]
 
 
 def _build_run_id(
@@ -496,8 +537,8 @@ async def _run_single(
     target_role: Optional[str],
     seed: int,
     out_dir: Path,
-    disable_post_message_after_round: Optional[int] = None,
-    disable_post_message: Optional[Union[bool, int]] = None,
+    disable_post_message_after_round: Any = _UNSET,
+    disable_post_message: Any = _UNSET,
 ) -> Dict[str, Any]:
     rng = random.Random(int(seed))
 
@@ -560,12 +601,20 @@ async def _run_single(
     is_benign = int(adversary_count) == 0
 
     # --- POST_MESSAGE DISABLING (for tool-based collusion) ---
-    resolved_disable_pm_after_round = _resolve_disable_pm_after_round(
-        disable_post_message_after_round
-        if disable_post_message_after_round is not None
-        else disable_post_message,
-        cfg,
-    )
+    # The sweep axis (resolved in `run_from_config` / `_resolve_disable_pm_axis`)
+    # has already made the decision: use it verbatim instead of re-resolving a
+    # `None` against the top-level config (which would silently override an
+    # explicit sweep-level `false` / `null`).
+    if disable_post_message_after_round is not _UNSET:
+        resolved_disable_pm_after_round = _normalize_disable_pm_value(
+            disable_post_message_after_round
+        )
+    elif disable_post_message is not _UNSET:
+        resolved_disable_pm_after_round = _normalize_disable_pm_value(
+            disable_post_message
+        )
+    else:
+        resolved_disable_pm_after_round = _resolve_disable_pm_after_round(_UNSET, cfg)
     set_post_message_disabled(resolved_disable_pm_after_round == 0)
 
     # --- DIRECTORY SETUP ---
@@ -738,7 +787,9 @@ async def _run_single(
         # 1. PLANNING
         for planning_round in range(1, planning_rounds + 1):
             if resolved_disable_pm_after_round is not None:
-                set_post_message_disabled(planning_round > resolved_disable_pm_after_round)
+                set_post_message_disabled(
+                    planning_round > resolved_disable_pm_after_round
+                )
             else:
                 set_post_message_disabled(False)
             last_agent = None
@@ -1135,15 +1186,7 @@ async def run_from_config(
             adv_counts = sweep.get("adversary_counts") or [1]
             target_roles = sweep.get("target_roles") or [None]
             patient_counts = sweep.get("num_patients") or [16]
-            raw_cut = sweep.get("disable_post_message_after_round")
-            raw_dpm = sweep.get("disable_post_message")
-            if raw_cut is not None:
-                dpm_list = raw_cut if isinstance(raw_cut, list) else [raw_cut]
-            elif raw_dpm is not None:
-                dpm_list = raw_dpm if isinstance(raw_dpm, list) else [raw_dpm]
-            else:
-                top_cut = _resolve_disable_pm_after_round(None, cfg)
-                dpm_list = [top_cut]
+            dpm_list = _resolve_disable_pm_axis(sweep, cfg)
 
             # Count only feasible combinations so progress is accurate.
             for topology in topologies:
@@ -1208,15 +1251,7 @@ async def run_from_config(
             adv_counts = sweep.get("adversary_counts") or [1]
             target_roles = sweep.get("target_roles") or [None]
             patient_counts = sweep.get("num_patients") or [16]
-            raw_cut = sweep.get("disable_post_message_after_round")
-            raw_dpm = sweep.get("disable_post_message")
-            if raw_cut is not None:
-                dpm_list = raw_cut if isinstance(raw_cut, list) else [raw_cut]
-            elif raw_dpm is not None:
-                dpm_list = raw_dpm if isinstance(raw_dpm, list) else [raw_dpm]
-            else:
-                top_cut = _resolve_disable_pm_after_round(None, cfg)
-                dpm_list = [top_cut]
+            dpm_list = _resolve_disable_pm_axis(sweep, cfg)
 
             for topology in topologies:
                 for num_agents in agent_counts:
@@ -1235,8 +1270,7 @@ async def run_from_config(
                                     )
                                     continue
 
-                                for dpm in dpm_list:
-                                    resolved_cut = _resolve_disable_pm_after_round(dpm, cfg)
+                                for resolved_cut in dpm_list:
                                     for seed in seeds:
                                         role_lbl = role if role else "Any"
                                         if resolved_cut is None:
