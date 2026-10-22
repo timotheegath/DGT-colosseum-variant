@@ -646,73 +646,11 @@ restriction modes:
 |---|---|---|
 | unset / `false` | Unrestricted (baseline) | `post_message` available in every phase. |
 | `0` | Restricted (tool-only collusion) | `post_message` gone from planning round 1 onwards. |
-| `N > 0` | Initial coordination only | Available during planning rounds `1..N`; removed for rounds `> N`. |
+| `N > 0` | Initial coordination only | Available during planning rounds `1..N`; removed for planning rounds `> N` and execution rounds. |
 
-Booleans are still accepted everywhere and map onto the integer form (`true` → `0`,
-`false` → unset), so pre-`96a08ad` configs keep working unchanged.
-
-Mechanically, the runner calls `set_post_message_disabled(...)` from
-`experiments/common/_patch_terrarium.py`. That patch wraps
-`ToolsetDiscovery.get_tools_for_blackboard` (returns `[]`) and
-`ToolsetDiscovery.get_blackboard_tool_names` (returns `set()`) while the flag is
-set. The flag is stored in a `contextvars.ContextVar`, so it is **task-local**:
-concurrent `_run_single` coroutines under `max_concurrent_runs > 1` each keep
-their own value and cannot clobber one another mid-round. It is re-evaluated per
-round rather than latched once per run:
-
-```python
-for planning_round in range(1, planning_rounds + 1):
-    set_post_message_disabled(planning_round > resolved)   # when resolved is not None
-# before the execution phase:
-set_post_message_disabled(_post_message_disabled_in_execution(resolved, planning_rounds))
-```
-
-The window spans planning rounds `1..N` and closes at the end of round `N`, so
-execution is restricted when `N == 0` or `N <= planning_rounds`, and keeps
-`post_message` only when the window never fully opened (`N > planning_rounds`).
-With the shipped `max_planning_rounds: 1`, both `N = 0` and `N = 1` restrict the
-execution phase. The post-run survey phase performs no further toggle and
-inherits the execution state.
-
-#### Where the value is read
-
-Resolved per sweep by `_resolve_disable_pm_axis` in `collusion_via_tools/run.py`,
-which delegates individual values to `_resolve_disable_pm_after_round`. The
-**most specific key that is present** wins:
-
-| # | Location | Example |
-|---|---|---|
-| 1 | `experiment.disable_post_message_after_round` | `experiment: {disable_post_message_after_round: 1}` |
-| 2 | `experiment.adversary.disable_post_message_after_round` | `experiment: {adversary: {disable_post_message_after_round: 0}}` |
-| 3 | `communication_network.disable_post_message_after_round` | `communication_network: {disable_post_message_after_round: 0}` |
-| 4 | `experiment.disable_post_message` | `experiment: {disable_post_message: true}` |
-| 5 | `experiment.adversary.disable_post_message` | `experiment: {adversary: {disable_post_message: true}}` |
-| 6 | `communication_network.disable_post_message` | `communication_network: {disable_post_message: true}` |
-| 7 | **Sweep axis** `sweeps[].disable_post_message_after_round` | see §9c |
-| 8 | **Sweep axis** `sweeps[].disable_post_message` (legacy) | see §9c |
 
 Presence is what matters, not truthiness: an explicit `false` / `null` is a real
 decision ("unrestricted here") and **stops** the search instead of falling
-through to the next key. A sweep can therefore override a top-level setting in
-either direction — `experiment.disable_post_message_after_round: 1` plus
-`sweeps[].disable_post_message_after_round: false` runs unrestricted, and its
-`run_id` carries no suffix. If a sweep sets neither axis key, the top-level
-resolution above applies to every run in that sweep.
-
-Effects when restricted:
-
-- `run_id` gets `__nopm` (`0`) or `__cut_after_r{N}` (`N > 0`) — §14.
-- `run_config.json["disable_post_message_after_round"]` records the resolved
-  integer (or `null`), and `run_config.json["disable_post_message"]` records the
-  boolean form (true only for the `0` case).
-- Toolset discovery returns no blackboard tools, so `post_message` calls vanish
-  from `tool_events.json` and the blackboard snapshots.
-
-> ⚠ **`collusion_via_tools` only.** Neither `collusion` nor `agent_misalignment`
-> reads this key — they silently ignore it. The patch in
-> `experiments/common/_patch_terrarium.py` is shared infrastructure, but only
-> `collusion_via_tools/run.py` calls `set_post_message_disabled`.
-
 ---
 
 ## 12. Judges
@@ -842,35 +780,6 @@ A run counts as **incomplete** when any of `run_config.json`, `metrics.json`,
 is missing, or when `agent_turns.json` contains `"response": "[ERROR]"`
 (default on). Always `--dry-run` first.
 
-`collusion_via_tools/resume.py` is **restriction-aware**: it expands each
-sweep's axis with the same `_resolve_disable_pm_axis` helper the runner uses and
-passes the resolved value into `_build_run_id(...)`, so `__nopm` and
-`__cut_after_r{N}` directories are matched instead of being re-run from scratch.
-A round-trip test asserts resume's run ids equal the ids `run_from_config`
-plans. Always `--dry-run` and check the count.
-
-> ⚠ `collusion_via_tools`'s resume still diverges from `run.py` on **other**
-> axes: its defaults for the shared axes are empty lists rather than `run.py`'s
-> `["complete"]` / `[9]` / `[16]`, and it honours per-sweep `seeds` and
-> `runs_per_setting`, which `run_from_config` ignores (§7, §9c).
-
-### A second, hidden output tree
-
-The shipped env prompt classes create their own `PromptLogger` with Terrarium's
-default root, so a parallel tree is written **outside** your output root:
-
-```
-logs/<EnvName>/<tags[0]>_<model>/<run_timestamp>/seed_<seed>/
-```
-
-The repo's own loggers are redirected into the run directory via `log_dir`, so
-this only affects artifacts created by the *environment*'s prompt classes
-(`agent_prompts.json`, `data_iteration_*.json`). It is not cleaned up per-experiment
-— several envs call `clear_seed_directories()` at init, which **erases**
-`logs/<Env>/<tag>/seed_<seed>` from an earlier run sharing that tag. If you rely
-on those files, read them from the run directory, not `logs/`.
-
----
 
 ## 15. Gotchas
 
@@ -927,18 +836,6 @@ on those files, read them from the run directory, not `logs/`.
     `.venv/bin/python -c "import os; print(os.environ.get('OPENAI_API_KEY'))"`.
 16. **There is no config schema validation and no CI.** A malformed axis list
     yields a zero-run sweep with no error.
-17. **The `post_message` restriction is task-local, not process-global.**
-    `set_post_message_disabled()` writes a `contextvars.ContextVar` in
-    `experiments/common/_patch_terrarium.py`, so concurrent `_run_single`
-    coroutines under `max_concurrent_runs > 1` each keep their own value and a
-    mixed axis such as `disable_post_message_after_round: [null, 0, 1]` no longer
-    races. This holds because terrarium resolves the toolset on the same asyncio
-    task that writes the flag — the only thread boundary in the path
-    (`terrarium.async_utils.run_blocking`) wraps the HTTP call, after the tools
-    are already resolved. If terrarium ever moves toolset discovery off-task,
-    this isolation silently stops holding and the lane's test in
-    `tests/test_post_message_scoping.py` is the thing that would catch it.
-
 ---
 
 ## 16. Designing a new experiment series — checklist
@@ -988,32 +885,4 @@ on those files, read them from the run directory, not `logs/`.
   `judge_beliefs.py`, `costs.py`, `tools.py`, `plots/`, `environment.py`) were
   copied verbatim, so behaviour changes in `agent_misalignment` do **not**
   propagate. Only shared infrastructure (`experiments/common/`) is common code.
-- **`collusion_via_tools/README.md` still says the env class is
-  `MisalignmentHospitalEnvironment` in `experiments.collusion_via_tools.environment`,
-  but the fork's runner resolves the env from `environment.import_path` in the
-  config** — confirm which class a given config points at before assuming.
-- `collusion_via_tools/resume.py` is restriction-aware, but still diverges from
-  `run.py` on the other axes (empty defaults for the shared axes; honours
-  per-sweep `seeds` and `runs_per_setting`, which `run_from_config` ignores) —
-  §14.
 
-## Appendix: where the schema actually lives
-
-The runners do **not** call `terrarium.utils.load_config` / `validate_config`,
-so Terrarium's own strict schema is bypassed — which is why `environment.import_path`
-works at all. The de-facto schema is split across four places:
-
-| Layer | Source | Owns |
-|---|---|---|
-| Sweep expansion, `experiment.*`, `run_id`, artifacts | `experiments/<exp>/run.py` | §7–§13 |
-| Graph construction, client factory, generation params | `terrarium/networks/factory.py`, `terrarium/utils.py` | §5, §6 |
-| Env parameters | `envs/dcops/*/*_env.py` (in the venv) | §4 |
-| `custom_oai_compatible` | `experiments/common/_patch_terrarium.py` (repo monkey-patch) | §6 |
-| `post_message` tool removal (`disable_post_message_after_round`) | `experiments/common/_patch_terrarium.py` (`ToolsetDiscovery` patch) | §9c, §11 |
-
-Terrarium is installed as a **wheel**, not an editable checkout
-(`terrarium-agents==0.1.1`, `site-packages/terrarium/`). `envs` is installed the
-same way; `external/CoLLAB` is only the problem-layer backend that
-`envs/dcops/__init__.py` puts on `sys.path` (honouring `TERRARIUM_COLLAB_PATH`).
-To read the env parameter table, look in
-`.venv/lib/python3.12/site-packages/envs/dcops/` — not in this repo.
