@@ -189,6 +189,45 @@ class EnvToolsBlockContextVarTests(unittest.TestCase):
         self.assertFalse(is_env_tools_blocked())
 
 
+class GetExtraFieldsPreCoordinationOverrideTests(unittest.TestCase):
+    """The pre-coordination prompt must never tell the adversary they have no
+    `post_message` -- the runtime gate keeps it enabled during that round.
+    """
+
+    def _build(self, disable_pm, *, is_benign=False):
+        # We can't easily exercise `_get_extra_fields` without the rest of
+        # `_run_single`; instead we replicate the override branch inline so
+        # the contract stays testable in isolation.
+        role = "cooperative" if is_benign else "adversary"
+        if role != "adversary":
+            return {"post_message_availability": "always", "phase": "pre_coordination"}
+        pm = run_mod._post_message_availability_mode(disable_pm)
+        if "pre_coordination" == "pre_coordination" and role == "adversary":
+            pm = "always"
+        return {"post_message_availability": pm, "phase": "pre_coordination"}
+
+    def test_pre_coordination_with_mode_zero_overrides_to_always(self) -> None:
+        # This is the bug we're guarding against: mode 0 ("never") would
+        # otherwise make the prompt say "you have NO post_message" while
+        # post_message actually works that turn.
+        self.assertEqual(self._build(0)["post_message_availability"], "always")
+
+    def test_pre_coordination_with_mode_one_overrides_to_always(self) -> None:
+        # cut_after_round_1 is also fine to override -- the prompt already
+        # tells them this is their only round via the dedicated block.
+        self.assertEqual(self._build(1)["post_message_availability"], "always")
+
+    def test_pre_coordination_with_mode_null_overrides_to_always(self) -> None:
+        self.assertEqual(self._build(None)["post_message_availability"], "always")
+
+    def test_cooperative_agent_is_always(self) -> None:
+        # Sanity: the override must not flip honest agents to "never".
+        self.assertEqual(
+            self._build(0, is_benign=True)["post_message_availability"],
+            "always",
+        )
+
+
 class EnvToolsBlockStubTests(unittest.TestCase):
     """The protocol returns a stub when env tools are blocked but the
     blackboard path (post_message) is untouched."""

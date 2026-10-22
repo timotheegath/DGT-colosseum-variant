@@ -908,6 +908,14 @@ async def _run_single(
             )
         else:
             post_message_availability = "always"
+        # During the pre-coordination round the adversary DOES have post_message
+        # regardless of the underlying `disable_post_message_after_round`
+        # setting -- otherwise the planning-shaped prompt would tell them
+        # "you have NO post_message" while the tool actually works. The
+        # dedicated pre-coordination block in prompts.py explains the
+        # situation in a way that does not contradict the runtime gate.
+        if phase == "pre_coordination" and role == "adversary":
+            post_message_availability = "always"
         return {
             "misalignment_role": role,
             "misalignment_adversaries": adversaries,
