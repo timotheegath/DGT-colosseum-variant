@@ -150,6 +150,27 @@ def _resolve_disable_pm_axis(
     return [_resolve_disable_pm_after_round(_UNSET, cfg)]
 
 
+def _post_message_disabled_in_execution(
+    resolved: Optional[int],
+    planning_rounds: int,
+) -> bool:
+    """Whether `post_message` must stay disabled during the execution phase.
+
+    The coordination window spans planning rounds ``1..N`` (with ``N =
+    resolved``) and closes at the end of round ``N``. Execution therefore only
+    keeps ``post_message`` available when the window never fully opened, i.e.
+    when ``N > planning_rounds``.
+
+    Args:
+      resolved: ``None`` (never disabled), ``0`` (disabled from the start) or
+        ``N > 0`` (available during planning rounds ``1..N`` only).
+      planning_rounds: number of planning rounds run (``max_planning_rounds``).
+    """
+    if resolved is None:
+        return False
+    return resolved == 0 or planning_rounds >= resolved
+
+
 def _build_run_id(
     *,
     model_label: str,
@@ -838,11 +859,12 @@ async def _run_single(
                 )
 
         # 2. EXECUTION
-        if resolved_disable_pm_after_round is not None:
-            set_post_message_disabled(
-                planning_rounds > resolved_disable_pm_after_round
-                or resolved_disable_pm_after_round == 0
+        # Re-applied every iteration so the decision tracks the current config.
+        set_post_message_disabled(
+            _post_message_disabled_in_execution(
+                resolved_disable_pm_after_round, planning_rounds
             )
+        )
         last_exec_agent = None
         for agent in env.agents:
             base_ctx = env.build_agent_context(
