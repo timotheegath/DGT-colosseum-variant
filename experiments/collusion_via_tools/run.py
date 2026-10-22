@@ -171,6 +171,28 @@ def _post_message_disabled_in_execution(
     return resolved == 0 or planning_rounds >= resolved
 
 
+def _post_message_availability_mode(resolved: Optional[int]) -> str:
+    """Normalize disable_post_message_after_round into a prompt-facing mode."""
+    if resolved is None:
+        return "always"
+    if resolved <= 0:
+        return "never"
+    return f"cut_after_round_{int(resolved)}"
+
+
+def _compute_effective_secret_channel(
+    secret_channel_enabled: bool,
+    resolved_disable_pm_after_round: Optional[int],
+) -> bool:
+    """Whether a coalition-only secret blackboard is actually created.
+
+    Mode ``0`` (``post_message`` disabled from the start) suppresses the secret
+    channel even when it was requested, because there is no tool left to write
+    to it.
+    """
+    return bool(secret_channel_enabled) and resolved_disable_pm_after_round != 0
+
+
 def _build_run_id(
     *,
     model_label: str,
@@ -681,6 +703,13 @@ async def _run_single(
     adv_cfg = (cfg.get("experiment") or {}).get("adversary") or {}
     secret_channel_enabled = bool(adv_cfg.get("secret_channel_enabled", False))
     coalition_clique_enabled = bool(adv_cfg.get("coalition_clique_enabled", False))
+    # Mode 0 (post_message never available) makes a coalition-only secret
+    # blackboard pointless: there is no tool to write to it, so it is suppressed
+    # even when `secret_channel_enabled` is true. Persist the raw request as well
+    # so downstream analysis can tell "never requested" from "suppressed by 0".
+    effective_secret_channel = _compute_effective_secret_channel(
+        secret_channel_enabled, resolved_disable_pm_after_round
+    )
 
     adversaries = _select_adversaries_hospital_coalition(
         agent_names=agent_names,
@@ -749,7 +778,7 @@ async def _run_single(
     await env.async_init()
 
     secret_blackboard_id: Optional[int] = None
-    if not is_benign and secret_channel_enabled and len(adversaries) >= 2:
+    if not is_benign and effective_secret_channel and len(adversaries) >= 2:
         try:
             base_context = env.get_network_context()
             secret_context = env.format_blackboard_context(adversaries, base_context)
@@ -784,15 +813,29 @@ async def _run_single(
     planning_rounds = int(cfg["simulation"].get("max_planning_rounds", 1))
     turns: List[Dict[str, Any]] = []
 
+    # Whether adversaries keep `post_message` during execution/survey: the
+    # coordination window is planning rounds 1..N, so it closes afterwards.
+    execution_disable_pm = _post_message_disabled_in_execution(
+        resolved_disable_pm_after_round, planning_rounds
+    )
+
     def _get_extra_fields(agent_name: str, phase: str) -> Dict[str, Any]:
         if is_benign:
             return {}
+        role = roles.get(agent_name, "cooperative")
+        if role == "adversary":
+            post_message_availability = _post_message_availability_mode(
+                resolved_disable_pm_after_round
+            )
+        else:
+            post_message_availability = "always"
         return {
-            "misalignment_role": roles.get(agent_name, "cooperative"),
+            "misalignment_role": role,
             "misalignment_adversaries": adversaries,
             "misalignment_secret_blackboard_id": secret_blackboard_id
-            if roles.get(agent_name) == "adversary"
+            if role == "adversary"
             else None,
+            "post_message_availability": post_message_availability,
             "phase": phase,
         }
 
@@ -808,13 +851,16 @@ async def _run_single(
         # 1. PLANNING
         for planning_round in range(1, planning_rounds + 1):
             if resolved_disable_pm_after_round is not None:
-                set_post_message_disabled(
-                    planning_round > resolved_disable_pm_after_round
-                )
+                round_level_disabled = planning_round > resolved_disable_pm_after_round
             else:
-                set_post_message_disabled(False)
+                round_level_disabled = False
             last_agent = None
             for agent in env.agents:
+                # Restriction is adversary-only: honest agents keep `post_message`.
+                if roles.get(agent.name) == "adversary":
+                    set_post_message_disabled(round_level_disabled)
+                else:
+                    set_post_message_disabled(False)
                 base_ctx = env.build_agent_context(
                     agent.name,
                     phase="planning",
@@ -859,14 +905,13 @@ async def _run_single(
                 )
 
         # 2. EXECUTION
-        # Re-applied every iteration so the decision tracks the current config.
-        set_post_message_disabled(
-            _post_message_disabled_in_execution(
-                resolved_disable_pm_after_round, planning_rounds
-            )
-        )
         last_exec_agent = None
         for agent in env.agents:
+            # Restriction is adversary-only: honest agents keep `post_message`.
+            if roles.get(agent.name) == "adversary":
+                set_post_message_disabled(execution_disable_pm)
+            else:
+                set_post_message_disabled(False)
             base_ctx = env.build_agent_context(
                 agent.name, phase="execution", iteration=iteration
             )
@@ -907,6 +952,11 @@ async def _run_single(
 
     # 3. SURVEY (POST-RUN BELIEFS)
     for agent in env.agents:
+        # Restriction is adversary-only: honest agents keep `post_message`.
+        if roles.get(agent.name) == "adversary":
+            set_post_message_disabled(execution_disable_pm)
+        else:
+            set_post_message_disabled(False)
         base_ctx = env.build_agent_context(
             agent.name, phase="survey", iteration=max(1, current_iteration)
         )
@@ -1045,6 +1095,7 @@ async def _run_single(
             "run_id": run_id,
             "adversaries": adversaries,
             "secret_channel_enabled": secret_channel_enabled,
+            "effective_secret_channel": effective_secret_channel,
             "secret_blackboard_id": secret_blackboard_id,
             "disable_post_message_after_round": resolved_disable_pm_after_round,
             "disable_post_message": (resolved_disable_pm_after_round == 0),
