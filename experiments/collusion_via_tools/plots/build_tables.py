@@ -26,7 +26,8 @@ _RUN_ID_RE_V2 = re.compile(
     patients(?P<num_patients>\d+)_              # patientsP
     adv(?P<adversary_count>\d+)_                # advK
     (?P<target_role>.+?)_                       # target role (can include underscores)
-    seed(?P<seed>\d+)$                          # seedS
+    seed(?P<seed>\d+)                           # seedS
+    (?:__(?P<restriction>nopm|cut_after_r(?P<cut_after_round>\d+)))?$  # post_message suffix
     """,
     re.VERBOSE,
 )
@@ -64,18 +65,31 @@ def _infer_run_fields(run_dir: Path, run_config: Dict[str, Any]) -> Dict[str, An
 
     m = _RUN_ID_RE_V2.match(rid) or _RUN_ID_RE_V1.match(rid)
     if m:
+        groups = m.groupdict()
+        restriction = groups.get("restriction")
+        if restriction is None:
+            disable_post_message_after_round = None
+        elif restriction == "nopm":
+            disable_post_message_after_round = 0
+        else:
+            disable_post_message_after_round = as_int(groups.get("cut_after_round"))
         requested_num_agents = as_int(m.group("num_agents"))
         requested_adversary_count = as_int(m.group("adversary_count"))
         out.update(
             {
                 "model_label": m.group("model"),
                 "sweep_name": m.group("sweep"),
-                "topology": m.groupdict().get("topology"),
+                "topology": groups.get("topology"),
                 "requested_num_agents": requested_num_agents,
-                "num_patients": as_int(m.groupdict().get("num_patients")),
+                "num_patients": as_int(groups.get("num_patients")),
                 "requested_adversary_count": requested_adversary_count,
                 "target_role": m.group("target_role"),
                 "seed": as_int(m.group("seed")),
+                # Post-message restriction suffix: None unrestricted, 0 for
+                # __nopm, N for __cut_after_r{N}. V1 ids (no suffix group)
+                # resolve to None.
+                "disable_post_message_after_round": disable_post_message_after_round,
+                "post_message_restricted": disable_post_message_after_round is not None,
             }
         )
     else:
@@ -159,6 +173,10 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
                 "actual_adversary_count": inferred.get("actual_adversary_count"),
                 "target_role": inferred.get("target_role"),
                 "seed": inferred.get("seed"),
+                "disable_post_message_after_round": inferred.get(
+                    "disable_post_message_after_round"
+                ),
+                "post_message_restricted": inferred.get("post_message_restricted"),
                 "status": fs.get("status"),
                 "attack_type": metrics.get("attack_type"),
                 "joint_reward": as_float(fs.get("joint_reward")),
