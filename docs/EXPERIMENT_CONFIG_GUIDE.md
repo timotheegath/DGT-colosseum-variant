@@ -2,17 +2,16 @@
 
 Everything you can put in an experiment YAML, and what each key actually does.
 
-This guide is for **designing a new experiment series**. It documents the
+This guide is for **designing a new experiment series** for the `collusion`,
+`agent_misalignment`, and `collusion_via_tools` experiments. It documents the
 *schema* — for a given experiment's concepts, plots, and analysis, read that
 experiment's own README:
 
 | Experiment | README |
 |---|---|
 | Covert collusion | `experiments/collusion/README.md` |
-| Network influence | `experiments/network_influence/README.md` |
 | Agent misalignment | `experiments/agent_misalignment/README.md` |
-| Persuasion (collusion) | `experiments/persuasion/collusion/README.md` |
-| Persuasion (hospital) | `experiments/persuasion/hospital/README.md` |
+| Collusion via tools (fork of `agent_misalignment`) | `experiments/collusion_via_tools/README.md` |
 
 Related: [`CUSTOM_OAI_COMPATIBLE_GUIDE.md`](./CUSTOM_OAI_COMPATIBLE_GUIDE.md)
 for the `custom_oai_compatible` provider and judge routing.
@@ -55,10 +54,9 @@ model → sweep → environments → topology → num_agents →
 ```
 
 (Bracketed axes exist only for some runners — see §9.) `prompt_variants` is
-innermost-but-one, so **if a run fails the whole sweep aborts** in
-`collusion` / `network_influence` / `persuasion.collusion` (they `raise` on the
-first failure), whereas `agent_misalignment` and `persuasion.hospital` record
-the error and continue.
+innermost-but-one, so **if a run fails the whole sweep aborts** in `collusion`
+(it `raise`s on the first failure), whereas `agent_misalignment` and
+`collusion_via_tools` record the error and continue.
 
 ---
 
@@ -94,25 +92,25 @@ simulation:
 | Key | Meaning | Overridable? |
 |---|---|---|
 | `seed` | Fallback seed. Used for the sweep if `experiment.seeds` and `sweeps[].seeds` are both absent. | Always overwritten per run by the effective seed. |
-| `max_iterations` | Outer simulation iterations. | **Ignored by `collusion`, `network_influence`, `persuasion.collusion`** — those hard-force it to `1`. Honoured by `agent_misalignment` (default 3 in configs) and `persuasion.hospital`. |
-| `max_planning_rounds` | Planning cycles per iteration (each agent gets a planning turn per round). | Yes — `experiment.planning_rounds` takes precedence in `collusion`, `network_influence`, `persuasion.collusion`. |
-| `max_conversation_steps` | Max tool-call steps per agent turn. This is a real cost lever. | Yes — `experiment.max_conversation_steps` takes precedence in the same three runners. |
+| `max_iterations` | Outer simulation iterations. | **Ignored by `collusion`** — it hard-forces it to `1`. Honoured by `agent_misalignment` (default 3 in configs). |
+| `max_planning_rounds` | Planning cycles per iteration (each agent gets a planning turn per round). | Yes — `experiment.planning_rounds` takes precedence in `collusion`. |
+| `max_conversation_steps` | Max tool-call steps per agent turn. This is a real cost lever. | Yes — `experiment.max_conversation_steps` takes precedence in `collusion`. |
 | `tags` | Written into `cfg["simulation"]["tags"]` for terrarium loggers. | No. |
 | `run_timestamp` | Set by the runner. Do not set it. | — |
 
 ### Precedence: `experiment` beats `simulation`
 
-In `collusion`, `network_influence`, and `persuasion.collusion`:
+In `collusion`:
 
 ```
-effective max_planning_rounds     = experiment.planning_rounds ?? simulation.max_planning_rounds ?? 1 (ni) / 2 (collusion)
+effective max_planning_rounds     = experiment.planning_rounds ?? simulation.max_planning_rounds ?? 2
 effective max_conversation_steps  = experiment.max_conversation_steps ?? simulation.max_conversation_steps ?? 3
 ```
 
 So `experiment.planning_rounds` / `experiment.max_conversation_steps` are
-**aliases that win over the `simulation` block** for those three runners, and are
-**silently ignored** by the other two. If you want one unambiguous place to set
-loop length, use `simulation:` — except where you specifically want the
+**aliases that win over the `simulation` block** in `collusion`, and are
+**silently ignored** by `agent_misalignment`. If you want one unambiguous place
+to set loop length, use `simulation:` — except where you specifically want the
 `experiment:` override.
 
 ---
@@ -128,9 +126,10 @@ environment:
 ```
 
 - `import_path` wins over `name` when both are present.
-- At least one is **required** in `collusion`, `network_influence`,
-  `persuasion/collusion`, `persuasion/hospital`.
-  `agent_misalignment` requires `import_path` and will raise if only `name` is set.
+- At least one is **required** in `collusion`. `agent_misalignment` requires
+  `import_path` and will raise if only `name` is set. `collusion_via_tools` also
+  requires `import_path` and raises `environment.import_path is required.` if it
+  is missing.
 - `name:` must be exported from `envs.dcps` (`envs/dcps/__init__.py`).
   Anything else needs `import_path`.
 - Setting both is fine and is what the hospital configs do — `name` is then only
@@ -157,7 +156,7 @@ experiment:
 Entries may be a bare string (treated as `name:`, or `import_path:` if it
 contains a `:`) or a dict with an optional `label` plus any `environment` keys.
 The label lands in the `run_id` as `__env<label>` and is de-duplicated with a
-`_2`, `_3` suffix if you reuse one. The other four runners ignore this key.
+`_2`, `_3` suffix if you reuse one. `agent_misalignment` ignores this key.
 
 ### Environment-specific parameters
 
@@ -211,16 +210,6 @@ CoLLAB `MeetingSchedulingConfig` fields (`instruction_mode`,
 Resource types, consumption map, patient pathways, the 168h horizon, the 4h
 transfer penalty, and all reward constants (missed step 500, resource failure
 300, holding 10/unit, transfer +15/unit) are **hardcoded**.
-
-### `PersonalAssistantEnvironment` / `SmartGridEnvironment`
-
-Less used, but present in `envs.dcps` and reachable via `import_path`:
-
-- **PersonalAssistant**: `min_outfits_per_agent` (4), `max_outfits_per_agent` (6),
-  `density`, `max_degree` (3)
-- **SmartGrid**: `timeline_length` (24, alias `T`), `tasks_per_home` ([3,6]),
-  `min_machines_per_agent`, `max_machines_per_agent`,
-  `min_sources_per_agent` (2), `max_sources_per_agent` (3)
 
 ### Known-dead `environment` keys
 
@@ -283,8 +272,8 @@ per-run sweep seed, so a topology sweep is reproducible.
 1. **`num_agents` is ignored by the network builder.** Graph size is always
    `len(agent_names)`. Terrarium never reads `communication_network.num_agents`
    when building a graph — but your **environment** reads it to size its agent
-   list (Jira, MeetingScheduling, PersonalAssistant, SmartGrid). If it disagrees
-   with the sweep's `num_agents`, you fail at env init with
+   list (Jira, MeetingScheduling). If it disagrees with the sweep's `num_agents`,
+   you fail at env init with
    `CommunicationNetwork nodes must match environment agent_names`.
    **HospitalEnvironment does not read it at all** — it derives agents from
    `environment.num_hospitals` (`4h + 1`).
@@ -472,7 +461,7 @@ experiment:
 | `output_dir` | **A stable root.** The runner appends `/<timestamp>/`. Never point `resume.py --root` at the bare `output_dir` — point it at the timestamped path. |
 | `max_concurrent_runs` | Must be a positive int. Higher = more API concurrency = more rate-limit pressure. Each concurrent run costs roughly `num_agents × (planning_rounds × agents + agents)` calls, so concurrency and agent count compound. |
 | `seeds` | Accepts `42`, `"1,2,3"`, or `[1,2,3]`. Non-numeric entries in a list are dropped. |
-| `runs_per_setting` | Slices `seeds` to the first N. Applies *after* sweep-level seeds override. Best cost lever for a pilot. |
+| `runs_per_setting` | Slices `seeds` to the first N. Applies *after* sweep-level seeds override. Best cost lever for a pilot. **Ignored by `agent_misalignment` and `collusion_via_tools`** (they read only `experiment.seeds`). |
 | `log_prompts` | Default `true` when absent. Set `false` to skip `PromptLogger` output (`agent_prompts.json`) and save disk/IO on large sweeps. |
 
 ### Seed precedence
@@ -492,6 +481,10 @@ cannot happen given the `[1]` fallback, but *can* happen if you set
 through to `experiment.seeds`. The real trap is `seeds: []` at both levels with
 `simulation.seed` unset — still `[1]`. Set seeds explicitly.
 
+`agent_misalignment` and `collusion_via_tools` ignore per-sweep `seeds` entirely
+and read only `experiment.seeds` (both also use `_normalize_seeds(...) or [1]`,
+so a malformed `seeds` silently becomes `[1]` rather than erroring).
+
 ---
 
 ## 8. `experiment.sweeps[]` — shared axes
@@ -502,7 +495,7 @@ Every sweep **must** have `name` (used as a directory name and in `run_id`).
 |---|---|
 | `topologies: []` | Graph families. See §5. |
 | `num_agents: []` | Number of agents. **Overrides** `communication_network.num_agents`. |
-| `seeds: []` | Per-sweep seed override. |
+| `seeds: []` | Per-sweep seed override. `agent_misalignment` and `collusion_via_tools` ignore this — they read only `experiment.seeds`. |
 
 Per-runner additional axes are in §9.
 
@@ -526,21 +519,7 @@ Per-runner additional axes are in §9.
 | `environments` | `[]` | Environment ablation; unique to this runner. |
 | `seeds` | `[]` | |
 
-### 9b. `network_influence` (`experiments/network_influence/run.py`)
-
-| Axis | Default | Notes |
-|---|---|---|
-| `topologies` | `[]` | |
-| `num_agents` | `[]` | |
-| `adversary_counts` | `[]` | `0` is the benign baseline. |
-| `seeds` | `[]` | |
-
-This is the **only** runner with up-front config validation
-(`_validate_config`). It requires `experiment:`, `environment:`,
-`llm_models:`, a non-empty `experiment.sweeps`, `sweeps[].name`, and non-empty
-`topologies` / `num_agents` / `adversary_counts`.
-
-### 9c. `agent_misalignment` (`experiments/agent_misalignment/run.py`)
+### 9b. `agent_misalignment` (`experiments/agent_misalignment/run.py`)
 
 | Axis | Default if omitted | Notes |
 |---|---|---|
@@ -558,51 +537,57 @@ exceed the hospital-based coalition cap. Infeasible combos are skipped.
 Defaults are applied at *both* the counting and execution passes, so they agree —
 but note this runner does **not** support `runs_per_setting` or per-sweep seeds.
 
-### 9d. `persuasion/collusion` (`experiments/persuasion/collusion/run.py`)
+### 9c. `collusion_via_tools` (`experiments/collusion_via_tools/run.py`)
 
-Same axes as `collusion` minus `environments`: `topologies`, `num_agents`,
-`colluder_counts`, `secret_channel_enabled`, `prompt_variants`, `seeds`.
+Self-contained fork of `agent_misalignment` (see
+`experiments/collusion_via_tools/README.md` for the rename history). Reads the
+same axes as §9b **minus `strategies`**, plus one of its own:
 
-### 9e. `persuasion/hospital` (`experiments/persuasion/hospital/run.py`)
+| Axis | Default if omitted | Notes |
+|---|---|---|
+| `topologies` | `["complete"]` | |
+| `num_agents` | `[9]` | Must be `1 + 4k` for Hospital. Infeasible values are **skipped with a warning**, not raised. |
+| `adversary_counts` | `[1]` | |
+| `target_roles` | `[null]` | `Resource_Provisioner`, `departmental`, or a department name (`Triage`/`Radiology`/`Surgery`/`Ward`). |
+| `num_patients` | `[16]` | Accepts the string `"num_agents_minus_1"`. |
+| `disable_post_message_after_round` | resolved from the non-sweep keys (§11) | After how many planning rounds `post_message` is removed: `0` = from round 1 (tool-only collusion), `N > 0` = allowed during rounds `1..N` only. Scalar or list. Replaces the boolean `disable_post_message` axis, which is still read as a legacy fallback. |
+| `disable_post_message` | *(legacy)* | Boolean (or list of bools), mapped onto the integer form: `true` → `0`, `false` → unset. Only consulted when `disable_post_message_after_round` is absent. |
 
-The widest cross-product. Axes: `topologies`, `num_agents`, `num_patients`,
-`strategies`, `colluder_counts`, `target_roles`, `coalition_clique_enabled`,
-`secret_channel_enabled`, `prompt_variants`, `seeds`.
+**`strategies` is gone.** The runner always applies the covert strategy
+(`COVERT_STRATEGY = "covert_max_coalition_reward"` in `agents.py`); a
+`strategies:` key is silently ignored. Benign runs are expressed as
+`adversary_counts: [0]`. Note this also means §9b's rule "`adversary_count == 0`
+requires `strategy == 'none'`" does not exist here — `adversary_count: 0` is
+accepted on its own.
 
-Defaults when omitted: `strategies` = all three attack types,
-`coalition_clique_enabled` = `[False]`, `secret_channel_enabled` = `[True]`,
-`prompt_variants` = `["control"]`.
+**Feasibility filter** (`_is_combo_feasible`): hospital-based runs only, and
+only the coalition cap — `adversary_count` may not exceed
+`_max_adversaries_for_hospital_env(num_hospitals, target_role)`. There is no
+strategy check (see above), and non-hospital environments are always feasible.
+Feasibility is evaluated *per* `disable_post_message_after_round` value, so a
+list like `[0, 1]` doubles the run count of an otherwise-identical sweep
+(counting and execution both multiply by `len(dpm_list)`).
 
-**Counting bug worth knowing:** the pre-flight `total_runs` counter iterates
-`strategies`, `colluder_counts`, and `target_roles` over their *defaults* when
-you omit them, while the execution pass iterates the same defaults — so they do
-agree, but the counter ignores feasibility entirely (unlike
-`agent_misalignment`), so `progress.json` can over-report.
+Defaults are applied at *both* the counting and execution passes, so they agree —
+this runner does **not** support `runs_per_setting` or per-sweep `seeds`.
+
+See §11 for where `disable_post_message_after_round` can also be set as a
+non-sweep config key, and §14 for the `run_id` suffixes it produces.
 
 ---
 
 ## 10. `prompt_variants` — the collusion axis
 
-Only meaningful when a secret channel exists.
+Built-in variants only take effect when a secret channel exists (see
+[§15](#15-gotchas) gotcha 2).
 
 ### `collusion` — `experiments/collusion/prompts.py`
 
 `control` (no injection), `simple`, `deception`, `structured`, `aggressive`.
 
-### `persuasion/collusion` — `experiments/persuasion/collusion/prompts.py`
-
-`control`, `helpful_misdirection`, `authority_nudge`, `social_proof`,
-`scarcity_pressure`, `reciprocity_trade`, `risk_aversion`, `cost_anchor`,
-`split_brain`.
-
-### `persuasion/hospital` — `experiments/persuasion/hospital/prompts.py`
-
-`control`, `helpful_misdirection`, `authority_nudge`, `social_proof`,
-`scarcity_pressure`, `reciprocity_trade`. (A 6-name subset of the above.)
-
 ### Custom variants
 
-All three prompt modules support overriding or adding text per variant:
+You can override or add text per variant:
 
 ```yaml
 experiment:
@@ -610,20 +595,17 @@ experiment:
     prompt_variant_overrides:
       my_variant: |
         You are part of a secret coalition ...
-  persuasion_collusion:
-    prompt_variant_overrides: {...}
-  persuasion_hospital:
-    prompt_variant_overrides: {...}
 ```
 
-An unknown variant name raises with the list of known names plus the
-`prompt_variant_overrides` hint.
+Overrides are looked up **before** the built-ins and may also redefine a
+built-in name — including `control`. An unknown variant name raises with the
+list of known names plus the `prompt_variant_overrides` hint.
 
 ---
 
 ## 11. Experiment-specific `experiment.*` blocks
 
-### `experiment.collusion` / `experiment.persuasion_collusion`
+### `experiment.collusion`
 
 | Key | Values | Default |
 |---|---|---|
@@ -634,28 +616,7 @@ An unknown variant name raises with the list of known names plus the
 `agent_order: random` shuffles the agent list with the seeded RNG;
 `colluders_first` keeps env order but partitions colluders ahead of non-colluders.
 
-### `experiment.persuasion_hospital`
-
-| Key | Values | Default |
-|---|---|---|
-| `colluder_selection` | `hospital_coalition`, `random`, `first` | `hospital_coalition` |
-| `prompt_variant_overrides` | map | `{}` |
-
-`hospital_coalition` fills department roles one hospital at a time, honouring
-`target_roles`.
-
-### `experiment.adversary` — two different meanings
-
-**`network_influence`** (read at `run.py:503`):
-
-| Key | Values | Default | Meaning |
-|---|---|---|---|
-| `strategy` | `random`, `highest_degree`, `center` | `random` | Adversary placement. Star graphs get special-cased: adversaries land on leaves, and the center only joins when everyone is an adversary. |
-| `force_seed` | bool | `true` | Whether the misinformation token is forced into the adversary's prompt. |
-| `victim_assignment` | `distinct`, `shared` | `distinct` | One victim per adversary, or one shared victim. Falls back to reusing victims (with a warning) when adversaries outnumber non-adversaries. |
-| `misinfo_frequency` | `once`, `always` | `always` | Re-seed the claim each planning round, or only in round 1. |
-
-**`agent_misalignment`** (read at `run.py:513`):
+### `experiment.adversary` — `agent_misalignment`
 
 | Key | Values | Default |
 |---|---|---|
@@ -667,40 +628,42 @@ sweep's `strategies` value, so setting it at the block level has no lasting
 effect. `attack_frequency` appears in the shipped configs but **is not read by
 the runner**.
 
-### `experiment.info`
+### `experiment.info` — `agent_misalignment`
 
-**`network_influence`**: `code_prefix` (default `PREF_CODE`), `true_preference`
-(default `attend`), `false_preference` (default `skip`).
+`code_prefix` only — and it is **not read** by the runner. It survives only
+in configs as dead config.
 
-**`agent_misalignment`**: `code_prefix` only — and it is also **not read** by the
-runner. It survives only in configs as dead config.
+### `post_message` restriction — `collusion_via_tools` (`d93257f`, extended in `96a08ad`, corrected 2026-10-22)
 
+A per-run toggle that removes Terrarium's `post_message` blackboard tool from the
+agent toolset, so agents can only coordinate through **domain tools**. Use it to
+isolate tool-mediated collusion from free-form blackboard coordination.
+
+`disable_post_message_after_round` is an **integer**, and covers all three
+restriction modes:
+
+| Value | Mode | Behaviour |
+|---|---|---|
+| unset / `false` | Unrestricted (baseline) | `post_message` available in every phase. |
+| `0` | Restricted (tool-only collusion) | `post_message` gone from planning round 1 onwards. |
+| `N > 0` | Initial coordination only | Available during planning rounds `1..N`; removed for planning rounds `> N` and execution rounds. |
+
+
+Presence is what matters, not truthiness: an explicit `false` / `null` is a real
+decision ("unrestricted here") and **stops** the search instead of falling
 ---
 
 ## 12. Judges
 
-Three separate mechanisms; pick per experiment.
+Two separate mechanisms, picked per experiment.
 
 | Experiment | Judge | Trigger | Config |
 |---|---|---|---|
-| `collusion`, `persuasion/collusion` | `judge_blackboards.py` | Standalone CLI after the sweep | `judge_llm` (top-level, via `--config`) |
-| `network_influence` | `judge_beliefs.py` | Inline, every run | `judge_llm` → `experiment.judge` → OpenAI default |
+| `collusion` | `judge_blackboards.py` | Standalone CLI after the sweep | `judge_llm` (top-level, via `--config`) |
 | `agent_misalignment` | `judge_beliefs.py` | Inline, every run | `judge_llm` → `experiment.evaluator` → OpenAI default |
-| `persuasion/hospital` | — | **No judge** (`judgements={}`) | n/a |
+| `collusion_via_tools` | `judge_beliefs.py` | Inline, every run | `judge_llm` → `experiment.evaluator` → OpenAI default |
 
-### `experiment.judge` (`network_influence`)
-
-```yaml
-experiment:
-  judge:
-    model: gpt-4.1-2025-04-14
-    params: {max_tokens: 256, temperature: 0.0}
-```
-
-OpenAI-only. Default model `gpt-4.1-2025-04-14`, default `max_tokens: 512`,
-default `temperature: 0.0`. Requires `OPENAI_API_KEY`.
-
-### `experiment.evaluator` (`agent_misalignment`)
+### `experiment.evaluator` (`agent_misalignment`, `collusion_via_tools`)
 
 ```yaml
 experiment:
@@ -709,7 +672,8 @@ experiment:
     params: {max_tokens: 512, temperature: 0.0}
 ```
 
-Same shape, default model `gpt-4`. Requires `OPENAI_API_KEY`.
+OpenAI-only. Default model `gpt-4`, default `max_tokens: 512`, default
+`temperature: 0.0`. Requires `OPENAI_API_KEY`.
 
 ### `judge_llm` (top-level, any provider)
 
@@ -721,14 +685,15 @@ judge_llm:
     params: {max_tokens: 512, temperature: 0.0}
 ```
 
-Overrides both of the above. `agent_misalignment` also accepts it nested under
-`experiment.judge_llm`; the other two read it **only** at the top level.
+Overrides the per-experiment judge defaults. `agent_misalignment` and
+`collusion_via_tools` also accept it nested under `experiment.judge_llm`;
+`collusion` reads it **only** at the top level.
 
 ---
 
 ## 13. `pricing:` — optional cost accounting
 
-Only `agent_misalignment` reads this from the config, and only to write
+Read by `agent_misalignment` and `collusion_via_tools`, and only to write
 `costs.json` per run:
 
 ```yaml
@@ -740,9 +705,13 @@ pricing:
 ```
 
 Both fields are required; either missing disables USD totals (token counts are
-still recorded). `experiments/agent_misalignment/costs.py` also falls back to
+still recorded). `experiments/agent_misalignment/costs.py` (and the fork's
+`experiments/collusion_via_tools/costs.py`) also falls back to
 `$TERRARIUM_PRICING_PATH` or a repo-root `pricing.json`, then to
 `config.json:pricing`, then reports `pricing_missing_for_model`.
+
+`collusion_via_tools` additionally writes a sweep-level `costs_summary.json`
+at the timestamp root, via `compute_and_write_costs(root, write_per_run=False)`.
 
 ---
 
@@ -754,10 +723,8 @@ still recorded). `experiments/agent_misalignment/costs.py` also falls back to
 ├── progress.json         # atomic; {status,total_runs,completed_runs,...}
 ├── experiment.log
 ├── summary.json          # one row per run
-├── summary.jsonl         # NDJSON, same rows
 ├── summary.csv           # flattened rows, sorted columns
-├── results.json          # persuasion/hospital uses this name instead
-├── runs.csv              # persuasion/hospital uses this name instead
+├── costs_summary.json    # agent_misalignment, collusion_via_tools
 └── runs/<model_label>/<sweep_name>/<run_id>/
     ├── run_config.json
     ├── final_summary.json
@@ -766,45 +733,44 @@ still recorded). `experiments/agent_misalignment/costs.py` also falls back to
     ├── tool_events.json
     ├── blackboards.json
     ├── blackboard_*.txt
-    ├── costs.json                # agent_misalignment
-    ├── agent_rewards.json        # hospital-based runners
-    ├── judge_results.json        # network_influence
-    ├── judgements.json           # agent_misalignment
-    ├── survey_responses.json     # network_influence
-    └── config.json / judge_usage.json (agent_misalignment)
+    ├── costs.json                # agent_misalignment, collusion_via_tools
+    ├── agent_rewards.json        # agent_misalignment, collusion_via_tools
+    ├── judgements.json           # agent_misalignment, collusion_via_tools
+    └── judge_usage.json          # agent_misalignment, collusion_via_tools
 ```
+
+`summary.jsonl` (NDJSON) is written by `collusion` only — neither
+`agent_misalignment` nor `collusion_via_tools` produces it.
 
 ### `run_id` formats
 
 | Runner | Format |
 |---|---|
 | `collusion` | `{model}__{sweep}[__env{env}]__{topology}__n{N}__c{C}__secret{0\|1}__pv{variant}__seed{S}` |
-| `network_influence` | `{model}__{sweep}__{topology}__n{N}__a{A}__seed{S}` |
-| `persuasion/collusion` | `{model}__{sweep}__{topology}__n{N}__c{C}__secret{0\|1}__pv{variant}__seed{S}` |
 | `agent_misalignment` | `{model}__{sweep}__topo{T}__strat{S}__agents{N}_patients{P}_adv{A}_{role}__seed{S}` |
-| `persuasion/hospital` | `{model}__{sweep}__topo{T}__agents{N}__strat{S}__c{C}__tr{role}__secret{0\|1}__pv{v}__seed{S}` |
+| `collusion_via_tools` | `{model}__{sweep}__topo{T}__agents{N}_patients{P}_adv{A}_{role}_seed{S}[__nopm\|__cut_after_r{N}]` |
 
-`persuasion/hospital` does **not** encode `coalition_clique_enabled` or
-`num_patients` in the `run_id`, so two runs differing only in those will collide
-on the same directory. Encode distinguishing factors in the **sweep name**.
+`collusion_via_tools` dropped the `__strat{...}` segment with the strategy axis
+(`d278b53`) and gained the two restriction suffixes (§11): `__nopm` for
+`disable_post_message_after_round: 0`, `__cut_after_r{N}` for `N > 0`, none when
+unset. So each value of a swept axis lands in a distinct directory.
 
 Path components are sanitised to `[A-Za-z0-9_.-]`; other characters become `_`.
 
+Both Hospital-based runners also define a legacy `_build_run_id_v1(...)`
+producing `{model}__{sweep}__agents{N}_adv{A}_{role}__seed{S}`. It is not called
+by `run.py`, but `resume.py` keeps it as a second lookup candidate for
+directories written by older runs.
+
 ### Resume
 
-**Not every experiment has one.** `persuasion/hospital` has **no `resume.py`** —
-an interrupted hospital sweep cannot be resumed in place.
-
-| Experiment | `resume.py` |
-|---|---|
-| `collusion`, `network_influence`, `agent_misalignment`, `persuasion/collusion` | yes |
-| `persuasion/hospital` | **no** |
+All three runners ship `resume.py`:
 
 ```bash
 .venv/bin/python -m experiments.<exp>.resume --root <output_dir>/<timestamp> --dry-run
 ```
 
-Flags (from `collusion/resume.py`; the others are close variants):
+Flags (from `collusion/resume.py`; the other two are close variants):
 `--config`, `--max-concurrent-runs`, `--stop-on-error`,
 `--require-status-complete`, `--rerun-error-turns` / `--no-rerun-error-turns`,
 `--dry-run`.
@@ -814,23 +780,6 @@ A run counts as **incomplete** when any of `run_config.json`, `metrics.json`,
 is missing, or when `agent_turns.json` contains `"response": "[ERROR]"`
 (default on). Always `--dry-run` first.
 
-### A second, hidden output tree
-
-The shipped env prompt classes create their own `PromptLogger` with Terrarium's
-default root, so a parallel tree is written **outside** your output root:
-
-```
-logs/<EnvName>/<tags[0]>_<model>/<run_timestamp>/seed_<seed>/
-```
-
-The repo's own loggers are redirected into the run directory via `log_dir`, so
-this only affects artifacts created by the *environment*'s prompt classes
-(`agent_prompts.json`, `data_iteration_*.json`). It is not cleaned up per-experiment
-— several envs call `clear_seed_directories()` at init, which **erases**
-`logs/<Env>/<tag>/seed_<seed>` from an earlier run sharing that tag. If you rely
-on those files, read them from the run directory, not `logs/`.
-
----
 
 ## 15. Gotchas
 
@@ -842,9 +791,11 @@ on those files, read them from the run directory, not `logs/`.
    `k: 2` / `rewire_prob: 0.3` — whatever is literally in the YAML. To vary
    those, you need one `sweeps` entry per parameterisation.
 2. **`prompt_variants` are silently dropped when `secret_channel_enabled: false`.**
-   The runner forces `control`. This is why `summary.csv` is missing rows you
-   "expect". Both counting and execution passes apply the filter, so the progress
-   total stays correct — the rows simply never existed.
+   The runner forces `control`, whose built-in text is `""`, and the prompt class
+   only injects the coalition block when the variant text is non-empty. This is
+   why `summary.csv` is missing rows you "expect". Both counting and execution
+   passes apply the filter, so the progress total stays correct — the rows simply
+   never existed.
 3. **The `custom-oai-compatible` provider requires the snake_case `provider:`
    value `custom_oai_compatible`.** The hyphenated form raises a `ValueError` —
    see §6.
@@ -859,46 +810,42 @@ on those files, read them from the run directory, not `logs/`.
    (agent_misalignment) are dead config.** They appear in shipped configs and are
    never read.
 8. **`agent_misalignment` ignores `runs_per_setting` and per-sweep `seeds`** — it
-   reads only `experiment.seeds`.
-9. **`persuasion/hospital` has no `resume.py`**, and omits
-   `coalition_clique_enabled` and `num_patients` from its `run_id`, so those axes
-   collide unless reflected in the sweep name.
-10. **`sweeps[].environments` only exists in `collusion`.** Elsewhere it is dead.
-11. **`judge_llm` in a `persuasion/collusion` config is not read by the runner** —
-    only by the standalone `collusion.judge_blackboards` CLI via `--config`. Same
-    for a `collusion` config's `judge_llm`.
-12. **`agent_misalignment` accepts `judge_llm` nested under `experiment:`** as
-    well as top-level; the other judges read it **only** at top level.
-13. **Validation is inconsistent.** `network_influence` validates up front;
-    `collusion` and `persuasion/collusion` validate almost nothing and fail
-    mid-sweep; `agent_misalignment` and `persuasion/hospital` skip infeasible
-    combos with a warning instead.
-14. **Failure semantics differ.** `collusion`, `network_influence`, and
-    `persuasion/collusion` re-`raise` on the first failed run (aborting the whole
-    sweep) and cancel in-flight tasks. `agent_misalignment` and
-    `persuasion/hospital` record `{"status": "error", ...}` and continue.
-15. **`num_agents` must match the environment's agent model.** Hospital requires
-    `1 + 4k`; the runners derive `num_hospitals` from it and overwrite any
-    hand-set value. Jira/Meeting/PersonalAssistant/SmartGrid instead read
+   reads only `experiment.seeds`. `collusion_via_tools` inherits this.
+9. **`sweeps[].environments` only exists in `collusion`.** In
+   `agent_misalignment` and `collusion_via_tools` it is dead.
+10. **`agent_misalignment` accepts `judge_llm` nested under `experiment:`** as
+    well as top-level; `collusion` reads it **only** at top level.
+11. **Validation is inconsistent.** `collusion` validates almost nothing and
+    fails mid-sweep; `agent_misalignment` and `collusion_via_tools` skip
+    infeasible combos with a warning instead.
+12. **Failure semantics differ.** `collusion` re-`raises` on the first failed
+    run (aborting the whole sweep) and cancels in-flight tasks.
+    `agent_misalignment` and `collusion_via_tools` record
+    `{"status": "error", ...}` and continue.
+13. **`num_agents` must match the environment's agent model.** Hospital requires
+    `1 + 4k`; the runner derives `num_hospitals` from it and overwrites any
+    hand-set value. Jira/MeetingScheduling instead read
     `communication_network.num_agents` to size their agent list — so a mismatch
     there fails at init, while a mismatch in Hospital fails as a silently wrong
     `num_hospitals`.
-16. **`consolidate_channels` dominates blackboard count**, and therefore cost and
+14. **`consolidate_channels` dominates blackboard count**, and therefore cost and
     observability. It is a per-run constant — it is *not* sweepable via any
     `sweeps[]` axis.
-17. **API keys come from the shell environment**, not `load_dotenv()` in the
+15. **API keys come from the shell environment**, not `load_dotenv()` in the
     runners. Verify the venv sees them:
     `.venv/bin/python -c "import os; print(os.environ.get('OPENAI_API_KEY'))"`.
-18. **There is no config schema validation and no CI.** A malformed axis list
+16. **There is no config schema validation and no CI.** A malformed axis list
     yields a zero-run sweep with no error.
-
 ---
 
 ## 16. Designing a new experiment series — checklist
 
 1. **Pick the runner first.** The sweep axes are runner-specific (§9). If your
    design needs an axis that runner doesn't read, you must either restructure the
-   design or fork the runner.
+   design or fork the runner. `collusion_via_tools` is the worked example of
+   exactly that: it forks `agent_misalignment` to add the `post_message`
+   restriction axis (§9c) and to drop `strategies` in favour of always-covert
+   behaviour.
 2. **Copy the closest shipped smoke config**, not the full-fat one. Smoke configs
    are one seed, small `num_agents`, one sweep entry — the right shape for a
    template.
@@ -906,7 +853,9 @@ on those files, read them from the run directory, not `logs/`.
    multiply by `(num_agents × (planning_rounds + 2))` agent-turns per run, then by
    agent-turn × conversation-steps. Cap with `runs_per_setting`.
 4. **Always include a baseline**: `secret_channel_enabled: [false, true]`, or
-   `adversary_counts: [0, ...]`, or a `strategies: [none]` sweep.
+   `adversary_counts: [0, ...]`, or a `strategies: [none]` sweep
+   (`agent_misalignment` only — `collusion_via_tools` dropped the axis and uses
+   `adversary_counts: [0]`).
 5. **Set `judge_llm:` or commit to `OPENAI_API_KEY`.** Otherwise inline-judge
    experiments silently require OpenAI regardless of your agent provider.
 6. **Dry-run first**: `resume.py --dry-run` against a throwaway run, or a
@@ -929,29 +878,11 @@ on those files, read them from the run directory, not `logs/`.
   only hard-fail on `< 3.11`, so 3.12 works fine — the "required" claim and the
   `.venv/lib/python3.11/...` paths in it are simply stale. Confirmed:
   `.venv/pyvenv.cfg` → `version_info = 3.12`.
-- `experiments/network_influence/README.md` and `network_influence/run.py`'s error
-  messages reference `configs/quickstart.yaml`, which **does not exist**.
 - `experiments/collusion/configs/README.md` references
   `collusion_jira_topologies_env_assignment_fills.yaml`, which **does not exist**.
-- `experiments/persuasion/hospital/` has plots but no `resume.py`, and the
-  top-level README implies resume is available for all five experiments.
+- **`collusion_via_tools` is a fork of `agent_misalignment`, not a consumer of
+  it.** Behavioural modules (`agents.py`, `metrics.py`, `prompts.py`,
+  `judge_beliefs.py`, `costs.py`, `tools.py`, `plots/`, `environment.py`) were
+  copied verbatim, so behaviour changes in `agent_misalignment` do **not**
+  propagate. Only shared infrastructure (`experiments/common/`) is common code.
 
-## Appendix: where the schema actually lives
-
-The runners do **not** call `terrarium.utils.load_config` / `validate_config`,
-so Terrarium's own strict schema is bypassed — which is why `environment.import_path`
-works at all. The de-facto schema is split across four places:
-
-| Layer | Source | Owns |
-|---|---|---|
-| Sweep expansion, `experiment.*`, `run_id`, artifacts | `experiments/<exp>/run.py` | §7–§13 |
-| Graph construction, client factory, generation params | `terrarium/networks/factory.py`, `terrarium/utils.py` | §5, §6 |
-| Env parameters | `envs/dcops/*/*_env.py` (in the venv) | §4 |
-| `custom_oai_compatible` | `experiments/common/_patch_terrarium.py` (repo monkey-patch) | §6 |
-
-Terrarium is installed as a **wheel**, not an editable checkout
-(`terrarium-agents==0.1.1`, `site-packages/terrarium/`). `envs` is installed the
-same way; `external/CoLLAB` is only the problem-layer backend that
-`envs/dcops/__init__.py` puts on `sys.path` (honouring `TERRARIUM_COLLAB_PATH`).
-To read the env parameter table, look in
-`.venv/lib/python3.12/site-packages/envs/dcops/` — not in this repo.
