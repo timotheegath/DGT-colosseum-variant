@@ -27,7 +27,8 @@ _RUN_ID_RE_V2 = re.compile(
     adv(?P<adversary_count>\d+)_                # advK
     (?P<target_role>.+?)_                       # target role (can include underscores)
     seed(?P<seed>\d+)                           # seedS
-    (?:__(?P<restriction>nopm|cut_after_r(?P<cut_after_round>\d+)))?$  # post_message suffix
+    (?:__(?P<restriction>nopm|cut_after_r(?P<cut_after_round>\d+)))?  # post_message suffix
+    (?P<precoord>__precoord)?$                  # optional pre_coordination_round flag
     """,
     re.VERBOSE,
 )
@@ -90,6 +91,9 @@ def _infer_run_fields(run_dir: Path, run_config: Dict[str, Any]) -> Dict[str, An
                 # resolve to None.
                 "disable_post_message_after_round": disable_post_message_after_round,
                 "post_message_restricted": disable_post_message_after_round is not None,
+                # Pre-coordination round: True when `__precoord` is present in
+                # the run id (may combine with any post-message suffix).
+                "pre_coordination_round": groups.get("precoord") is not None,
             }
         )
     else:
@@ -177,6 +181,7 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
                     "disable_post_message_after_round"
                 ),
                 "post_message_restricted": inferred.get("post_message_restricted"),
+                "pre_coordination_round": inferred.get("pre_coordination_round"),
                 "status": fs.get("status"),
                 "attack_type": metrics.get("attack_type"),
                 "joint_reward": as_float(fs.get("joint_reward")),

@@ -10,6 +10,8 @@ from terrarium.environment_tools import (
     instantiate_environment_tools,
 )
 
+from experiments.common._patch_terrarium import is_env_tools_blocked
+
 
 @dataclass(slots=True)
 class ToolEvent:
@@ -95,9 +97,10 @@ class LocalCommunicationProtocol(BaseCommunicationProtocol):
                 tmpl = getattr(bb, "template", None)
                 if not isinstance(tmpl, dict):
                     continue
-                is_secret = bool(tmpl.get("secret_channel")) or str(
-                    tmpl.get("visibility") or ""
-                ).lower() == "secret"
+                is_secret = (
+                    bool(tmpl.get("secret_channel"))
+                    or str(tmpl.get("visibility") or "").lower() == "secret"
+                )
                 if not is_secret:
                     continue
                 logs = getattr(bb, "logs", None)
@@ -153,6 +156,30 @@ class LocalCommunicationProtocol(BaseCommunicationProtocol):
         phase: Optional[str] = None,
         iteration: Optional[int] = None,
     ) -> Dict[str, Any]:
+        # Pre-coordination round: silently drop env-tool calls so the agent
+        # sees the tools in its prompt but cannot probe the environment.
+        # The blackboard tools (`post_message`) flow through
+        # `blackboard_handle_tool_call` and are unaffected.
+        if is_env_tools_blocked():
+            stub_result = {
+                "result": None,
+                "blocked": True,
+                "reason": (
+                    "env tools are blocked during the pre-coordination round; "
+                    "use `post_message` on the coalition-only blackboard to "
+                    "agree on a tool-only protocol"
+                ),
+            }
+            self._record_tool_event(
+                tool_name=tool_name,
+                agent_name=agent_name,
+                arguments=arguments,
+                result=stub_result,
+                phase=phase,
+                iteration=iteration,
+            )
+            return stub_result
+
         env = self.environment
         if env is None:
             result = {"error": "Environment not set on protocol."}

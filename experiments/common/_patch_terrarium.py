@@ -404,6 +404,35 @@ def is_post_message_disabled() -> bool:
     return _POST_MESSAGE_DISABLED.get()
 
 
+# ---------------------------------------------------------------------------
+# Environment-tools block (e.g. for the pre-coordination round: agents see
+# `broadcast_message`, `transfer_resources`, etc. in their prompt, but any call
+# is silently dropped so they cannot probe the environment before losing the
+# private channel).
+# ---------------------------------------------------------------------------
+# Same task-local ContextVar rationale as `_POST_MESSAGE_DISABLED`.
+_ENV_TOOLS_BLOCKED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "colosseum_env_tools_blocked", default=False
+)
+
+
+def set_env_tools_blocked(blocked: bool) -> None:
+    """Block all environment tool calls (e.g. ``broadcast_message``,
+    ``transfer_resources``) for the current task/context.
+
+    Used during the pre-coordination round so that adversaries cannot probe
+    the environment before they lose ``post_message``. The agent still sees
+    the tools in its prompt; the protocol layer returns an empty result
+    instead of executing them.
+    """
+    _ENV_TOOLS_BLOCKED.set(bool(blocked))
+
+
+def is_env_tools_blocked() -> bool:
+    """Return whether environment tools are blocked in the current task/context."""
+    return _ENV_TOOLS_BLOCKED.get()
+
+
 def _install_blackboard_tools_patch() -> None:
     """Patch ToolsetDiscovery to allow disabling post_message dynamically."""
     try:

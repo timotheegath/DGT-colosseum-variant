@@ -39,7 +39,10 @@ from experiments.collusion_via_tools.metrics import compute_misalignment_metrics
 from experiments.collusion_via_tools.prompts import MisalignmentPrompts
 from experiments.common.local_protocol import LocalCommunicationProtocol
 from experiments.collusion_via_tools.judge_beliefs import judge_run
-from experiments.common._patch_terrarium import set_post_message_disabled
+from experiments.common._patch_terrarium import (
+    set_env_tools_blocked,
+    set_post_message_disabled,
+)
 
 from terrarium.networks import build_communication_network
 from terrarium.logger import AgentTrajectoryLogger, PromptLogger
@@ -150,6 +153,66 @@ def _resolve_disable_pm_axis(
     return [_resolve_disable_pm_after_round(_UNSET, cfg)]
 
 
+def _normalize_pre_coordination_value(val: Any) -> bool:
+    """Maps a raw knob value onto a strict bool for `pre_coordination_round`.
+
+    `true` / non-zero ints -> True, `false` / `null` / 0 -> False. Stricter
+    than `_normalize_disable_pm_value` because the only meaningful question is
+    "run the round or not".
+    """
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(int(val))
+    if isinstance(val, str):
+        return val.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _resolve_pre_coordination_round(
+    val: Any = _UNSET,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Resolves whether the pre-coordination round is enabled for a run.
+
+    Presence (not truthiness) wins: a sweep-level `false` stops the search and
+    is treated as "no pre-coordination round", mirroring the
+    `disable_post_message_after_round` resolution semantics.
+    """
+    if val is not _UNSET:
+        return _normalize_pre_coordination_value(val)
+
+    if not cfg:
+        return False
+
+    exp_cfg = cfg.get("experiment") or {}
+    adv_cfg = exp_cfg.get("adversary") or {}
+    net_cfg = cfg.get("communication_network") or {}
+
+    for source in (exp_cfg, adv_cfg, net_cfg):
+        if "pre_coordination_round" in source:
+            return _normalize_pre_coordination_value(source["pre_coordination_round"])
+    return False
+
+
+def _resolve_pre_coordination_axis(
+    sweep: Dict[str, Any],
+    cfg: Optional[Dict[str, Any]] = None,
+) -> List[bool]:
+    """Resolves the `pre_coordination_round` axis for one sweep.
+
+    Mirrors `_resolve_disable_pm_axis`: a sweep-level key (scalar or list) wins,
+    otherwise we fall through to the top-level resolution. The result is always
+    a list, even when the sweep sets a single bool (so the runner can iterate
+    uniformly).
+    """
+    if isinstance(sweep, dict) and "pre_coordination_round" in sweep:
+        raw = sweep["pre_coordination_round"]
+        items = raw if isinstance(raw, list) else [raw]
+        return [_normalize_pre_coordination_value(item) for item in items]
+    return [_resolve_pre_coordination_round(_UNSET, cfg)]
+
+
 def _post_message_disabled_in_execution(
     resolved: Optional[int],
     planning_rounds: int,
@@ -205,6 +268,7 @@ def _build_run_id(
     seed: int,
     disable_post_message_after_round: Optional[int] = None,
     disable_post_message: Optional[bool] = None,
+    pre_coordination_round: bool = False,
 ) -> str:
     model_safe = _sanitize_path_component(model_label)
     sweep_safe = _sanitize_path_component(sweep_name)
@@ -221,6 +285,9 @@ def _build_run_id(
         suffix = "__nopm"
     else:
         suffix = f"__cut_after_r{after_round}"
+
+    if pre_coordination_round:
+        suffix = f"{suffix}__precoord" if suffix else "__precoord"
 
     return (
         f"{model_safe}__{sweep_safe}"
@@ -582,6 +649,7 @@ async def _run_single(
     out_dir: Path,
     disable_post_message_after_round: Any = _UNSET,
     disable_post_message: Any = _UNSET,
+    pre_coordination_round: bool = False,
 ) -> Dict[str, Any]:
     rng = random.Random(int(seed))
 
@@ -660,6 +728,16 @@ async def _run_single(
         resolved_disable_pm_after_round = _resolve_disable_pm_after_round(_UNSET, cfg)
     set_post_message_disabled(resolved_disable_pm_after_round == 0)
 
+    # --- PRE-COORDINATION ROUND ---
+    # A single, planning-prompt-shaped round run before the main simulation
+    # for adversaries only. `post_message` (and the secret blackboard) are
+    # available; all environment tools (`broadcast_message`, `transfer_resources`,
+    # etc.) are silently dropped by `LocalCommunicationProtocol` so the
+    # adversary cannot probe the environment before losing `post_message`.
+    resolved_pre_coordination = _resolve_pre_coordination_round(
+        pre_coordination_round, cfg
+    )
+
     # --- DIRECTORY SETUP ---
     run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_id = _build_run_id(
@@ -672,6 +750,7 @@ async def _run_single(
         target_role=target_role,
         seed=int(seed),
         disable_post_message_after_round=resolved_disable_pm_after_round,
+        pre_coordination_round=resolved_pre_coordination,
     )
     run_dir = out_dir / "runs" / model_label / sweep_name / run_id
     _ensure_dir(run_dir)
@@ -838,6 +917,68 @@ async def _run_single(
             "post_message_availability": post_message_availability,
             "phase": phase,
         }
+
+    # --- PRE-COORDINATION ROUND ---
+    # Runs once, before iteration 1, for adversaries only. The agent receives
+    # the planning-shaped prompt (same as planning phase) but
+    # `LocalCommunicationProtocol.environment_handle_tool_call` returns a stub
+    # for any env-tool invocation, so the adversary cannot probe the
+    # environment or commit to operational actions before losing `post_message`.
+    # `post_message` (and the secret blackboard) remain available.
+    if resolved_pre_coordination and not is_benign:
+        # Restore the post_message state — the loop below assumes it is on.
+        set_post_message_disabled(False)
+        set_env_tools_blocked(True)
+        last_pre_agent: Optional[str] = None
+        for agent in env.agents:
+            if roles.get(agent.name) != "adversary":
+                continue
+            base_ctx = env.build_agent_context(
+                agent.name,
+                phase="pre_coordination",
+                iteration=0,
+                planning_round=0,
+            )
+            extra = _get_extra_fields(agent.name, "pre_coordination")
+            agent_context = (
+                base_ctx if not extra else _augment_context(base_ctx, extra=extra)
+            )
+            response = await protocol.agent_planning_turn(
+                agent,
+                agent.name,
+                agent_context,
+                env,
+                iteration=0,
+                planning_round=0,
+            )
+            turns.append(
+                {
+                    "phase": "pre_coordination",
+                    "iteration": 0,
+                    "round": 0,
+                    "agent": agent.name,
+                    "role": roles[agent.name],
+                    "response": response.get("response"),
+                    "usage": response.get("usage"),
+                    "tools_executed": response.get("tools_executed"),
+                }
+            )
+            last_pre_agent = agent.name
+        if last_pre_agent:
+            try:
+                _log_blackboards_txt(
+                    bb_logger=bb_logger,
+                    protocol=protocol,
+                    iteration=0,
+                    phase="pre_coordination",
+                    agent_name=last_pre_agent,
+                    planning_round=0,
+                )
+            except Exception:
+                pass
+        # Restore env-tool gating for the simulation loop. `post_message` will
+        # be re-set per-agent below based on `resolved_disable_pm_after_round`.
+        set_env_tools_blocked(False)
 
     current_iteration = 0
     for iteration in range(1, max_iterations + 1):
@@ -1099,6 +1240,7 @@ async def _run_single(
             "secret_blackboard_id": secret_blackboard_id,
             "disable_post_message_after_round": resolved_disable_pm_after_round,
             "disable_post_message": (resolved_disable_pm_after_round == 0),
+            "pre_coordination_round": resolved_pre_coordination,
             "roles": roles,
             "metrics": asdict(metrics),
         },
@@ -1325,6 +1467,7 @@ async def run_from_config(
             target_roles = sweep.get("target_roles") or [None]
             patient_counts = sweep.get("num_patients") or [16]
             dpm_list = _resolve_disable_pm_axis(sweep, cfg)
+            precoord_list = _resolve_pre_coordination_axis(sweep, cfg)
 
             for topology in topologies:
                 for num_agents in agent_counts:
@@ -1344,38 +1487,46 @@ async def run_from_config(
                                     continue
 
                                 for resolved_cut in dpm_list:
-                                    for seed in seeds:
-                                        role_lbl = role if role else "Any"
-                                        if resolved_cut is None:
-                                            pm_lbl = ""
-                                        elif resolved_cut == 0:
-                                            pm_lbl = "__nopm"
-                                        else:
-                                            pm_lbl = f"__cut_after_r{resolved_cut}"
-                                        run_label = (
-                                            f"{model_label}/{sweep_name}/topo{topology}"
-                                            f"/n{num_agents}/p{num_patients}/adv{ac}/{role_lbl}{pm_lbl}/seed{seed}"
-                                        )
-
-                                        task = asyncio.create_task(
-                                            _run_guarded(
-                                                run_label=run_label,
-                                                base_cfg=cfg,
-                                                model_label=model_label,
-                                                model_llm_cfg=model_llm,
-                                                sweep_name=sweep_name,
-                                                topology=str(topology),
-                                                num_agents=num_agents,
-                                                adversary_count=ac,
-                                                num_patients=num_patients,
-                                                target_role=role,
-                                                seed=seed,
-                                                out_dir=root,
-                                                disable_post_message_after_round=resolved_cut,
+                                    for resolved_precoord in precoord_list:
+                                        for seed in seeds:
+                                            role_lbl = role if role else "Any"
+                                            if resolved_cut is None:
+                                                pm_lbl = ""
+                                            elif resolved_cut == 0:
+                                                pm_lbl = "__nopm"
+                                            else:
+                                                pm_lbl = f"__cut_after_r{resolved_cut}"
+                                            if resolved_precoord:
+                                                pm_lbl = (
+                                                    f"{pm_lbl}__precoord"
+                                                    if pm_lbl
+                                                    else "__precoord"
+                                                )
+                                            run_label = (
+                                                f"{model_label}/{sweep_name}/topo{topology}"
+                                                f"/n{num_agents}/p{num_patients}/adv{ac}/{role_lbl}{pm_lbl}/seed{seed}"
                                             )
-                                        )
-                                        tasks.append(task)
-                                        task_labels[task] = run_label
+
+                                            task = asyncio.create_task(
+                                                _run_guarded(
+                                                    run_label=run_label,
+                                                    base_cfg=cfg,
+                                                    model_label=model_label,
+                                                    model_llm_cfg=model_llm,
+                                                    sweep_name=sweep_name,
+                                                    topology=str(topology),
+                                                    num_agents=num_agents,
+                                                    adversary_count=ac,
+                                                    num_patients=num_patients,
+                                                    target_role=role,
+                                                    seed=seed,
+                                                    out_dir=root,
+                                                    disable_post_message_after_round=resolved_cut,
+                                                    pre_coordination_round=resolved_precoord,
+                                                )
+                                            )
+                                            tasks.append(task)
+                                            task_labels[task] = run_label
 
     # Execution Loop (Robust)
     with tqdm(total=len(tasks), desc="Experiments", unit="run") as pbar:

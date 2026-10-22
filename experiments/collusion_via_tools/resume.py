@@ -43,6 +43,7 @@ class RunSpec:
     target_role: Any
     seed: int
     disable_post_message_after_round: Optional[int] = None
+    pre_coordination_round: bool = False
 
     @property
     def run_id(self) -> str:
@@ -56,6 +57,7 @@ class RunSpec:
             target_role=self.target_role,
             seed=self.seed,
             disable_post_message_after_round=self.disable_post_message_after_round,
+            pre_coordination_round=self.pre_coordination_round,
         )
 
     @property
@@ -139,6 +141,7 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
             # `false` back through the config-reading path and yield run_ids
             # the runner never creates.
             resolved_cuts = run_mod._resolve_disable_pm_axis(sweep, cfg)
+            resolved_precoord = run_mod._resolve_pre_coordination_axis(sweep, cfg)
 
             for topology in topologies:
                 for n in agent_counts:
@@ -146,25 +149,28 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
                         for role in target_roles:
                             for num_patients in patient_counts:
                                 for resolved_cut in resolved_cuts:
-                                    for seed in seeds:
-                                        yield RunSpec(
-                                            model_label=model_label,
-                                            model_llm_cfg=llm_cfg,
-                                            sweep_name=sweep_name,
-                                            topology=str(topology),
-                                            num_agents=int(n),
-                                            num_patients=int(
-                                                run_mod._resolve_num_patients_spec(
-                                                    raw=num_patients, num_agents=int(n)
-                                                )
-                                            ),
-                                            adversary_count=int(a),
-                                            target_role=role,
-                                            seed=int(seed),
-                                            disable_post_message_after_round=(
-                                                resolved_cut
-                                            ),
-                                        )
+                                    for precoord in resolved_precoord:
+                                        for seed in seeds:
+                                            yield RunSpec(
+                                                model_label=model_label,
+                                                model_llm_cfg=llm_cfg,
+                                                sweep_name=sweep_name,
+                                                topology=str(topology),
+                                                num_agents=int(n),
+                                                num_patients=int(
+                                                    run_mod._resolve_num_patients_spec(
+                                                        raw=num_patients,
+                                                        num_agents=int(n),
+                                                    )
+                                                ),
+                                                adversary_count=int(a),
+                                                target_role=role,
+                                                seed=int(seed),
+                                                disable_post_message_after_round=(
+                                                    resolved_cut
+                                                ),
+                                                pre_coordination_round=precoord,
+                                            )
 
 
 def _select_incomplete_runs(
@@ -274,6 +280,7 @@ async def resume_runs(
                         disable_post_message_after_round=(
                             spec.disable_post_message_after_round
                         ),
+                        pre_coordination_round=spec.pre_coordination_round,
                     )
                     completed += 1
                 except Exception:
@@ -320,6 +327,7 @@ async def resume_runs(
                         disable_post_message_after_round=(
                             spec.disable_post_message_after_round
                         ),
+                        pre_coordination_round=spec.pre_coordination_round,
                     )
 
             tasks = []
