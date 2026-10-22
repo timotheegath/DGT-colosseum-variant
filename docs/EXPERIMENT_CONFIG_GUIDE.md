@@ -633,7 +633,7 @@ the runner**.
 `code_prefix` only — and it is **not read** by the runner. It survives only
 in configs as dead config.
 
-### `post_message` restriction — `collusion_via_tools` (`d93257f`, extended in `96a08ad`)
+### `post_message` restriction — `collusion_via_tools` (`d93257f`, extended in `96a08ad`, corrected 2026-10-22)
 
 A per-run toggle that removes Terrarium's `post_message` blackboard tool from the
 agent toolset, so agents can only coordinate through **domain tools**. Use it to
@@ -655,26 +655,30 @@ Mechanically, the runner calls `set_post_message_disabled(...)` from
 `experiments/common/_patch_terrarium.py`. That patch wraps
 `ToolsetDiscovery.get_tools_for_blackboard` (returns `[]`) and
 `ToolsetDiscovery.get_blackboard_tool_names` (returns `set()`) while the flag is
-set. As of `96a08ad` the flag is **re-evaluated per round** rather than latched
-once per run:
+set. The flag is stored in a `contextvars.ContextVar`, so it is **task-local**:
+concurrent `_run_single` coroutines under `max_concurrent_runs > 1` each keep
+their own value and cannot clobber one another mid-round. It is re-evaluated per
+round rather than latched once per run:
 
 ```python
 for planning_round in range(1, planning_rounds + 1):
     set_post_message_disabled(planning_round > resolved)   # when resolved is not None
 # before the execution phase:
-set_post_message_disabled(planning_rounds > resolved or resolved == 0)
+set_post_message_disabled(_post_message_disabled_in_execution(resolved, planning_rounds))
 ```
 
-So the restriction holds through execution when the coordination window closed
-before the last planning round (`N < simulation.max_planning_rounds`) or when
-`N == 0`. With the shipped `max_planning_rounds: 1`, **`N = 1` leaves execution
-unrestricted** — only `N = 0` restricts it. The post-run survey phase performs
-no further toggle and inherits the execution state.
+The window spans planning rounds `1..N` and closes at the end of round `N`, so
+execution is restricted when `N == 0` or `N <= planning_rounds`, and keeps
+`post_message` only when the window never fully opened (`N > planning_rounds`).
+With the shipped `max_planning_rounds: 1`, both `N = 0` and `N = 1` restrict the
+execution phase. The post-run survey phase performs no further toggle and
+inherits the execution state.
 
 #### Where the value is read
 
-Resolved once per run by `_resolve_disable_pm_after_round` in
-`collusion_via_tools/run.py`. The **first key that is not `null`** wins:
+Resolved per sweep by `_resolve_disable_pm_axis` in `collusion_via_tools/run.py`,
+which delegates individual values to `_resolve_disable_pm_after_round`. The
+**most specific key that is present** wins:
 
 | # | Location | Example |
 |---|---|---|
@@ -687,18 +691,13 @@ Resolved once per run by `_resolve_disable_pm_after_round` in
 | 7 | **Sweep axis** `sweeps[].disable_post_message_after_round` | see §9c |
 | 8 | **Sweep axis** `sweeps[].disable_post_message` (legacy) | see §9c |
 
-The `*_after_round` keys take precedence over their boolean counterparts, and an
-explicit `false` **stops** the search — it resolves to "unrestricted" instead of
-falling through to the next key. If a sweep sets neither axis key, the
-top-level resolution above applies to every run in that sweep.
-
-> ⚠ **A sweep cannot turn it back off.** A sweep-level `false` resolves to unset
-> and is re-resolved against the top-level keys inside `_run_single`. With
-> `experiment.disable_post_message: true` at the top level, a sweep that sets
-> `disable_post_message_after_round: false` still runs restricted — and its
-> `run_id` carries no suffix, because the suffix is computed from the
-> sweep-level resolution. Use separate sweeps (or separate `output_dir`s) instead
-> of a per-sweep `false` override.
+Presence is what matters, not truthiness: an explicit `false` / `null` is a real
+decision ("unrestricted here") and **stops** the search instead of falling
+through to the next key. A sweep can therefore override a top-level setting in
+either direction — `experiment.disable_post_message_after_round: 1` plus
+`sweeps[].disable_post_message_after_round: false` runs unrestricted, and its
+`run_id` carries no suffix. If a sweep sets neither axis key, the top-level
+resolution above applies to every run in that sweep.
 
 Effects when restricted:
 
@@ -843,13 +842,17 @@ A run counts as **incomplete** when any of `run_config.json`, `metrics.json`,
 is missing, or when `agent_turns.json` contains `"response": "[ERROR]"`
 (default on). Always `--dry-run` first.
 
-> ⚠ **`collusion_via_tools/resume.py` is unaware of the `post_message`
-> restriction.** `RunSpec.run_id` calls `_build_run_id(...)` without either
-> `disable_post_message_after_round` or `disable_post_message`, so it only ever
-> generates the un-suffixed form. `__nopm` and `__cut_after_r{N}` runs are
-> therefore invisible to resume — it treats them as missing and re-runs them
-> every time. Put restricted settings in their own `output_dir` so at least the
-> collisions stay contained, or re-run those settings from scratch.
+`collusion_via_tools/resume.py` is **restriction-aware**: it expands each
+sweep's axis with the same `_resolve_disable_pm_axis` helper the runner uses and
+passes the resolved value into `_build_run_id(...)`, so `__nopm` and
+`__cut_after_r{N}` directories are matched instead of being re-run from scratch.
+A round-trip test asserts resume's run ids equal the ids `run_from_config`
+plans. Always `--dry-run` and check the count.
+
+> ⚠ `collusion_via_tools`'s resume still diverges from `run.py` on **other**
+> axes: its defaults for the shared axes are empty lists rather than `run.py`'s
+> `["complete"]` / `[9]` / `[16]`, and it honours per-sweep `seeds` and
+> `runs_per_setting`, which `run_from_config` ignores (§7, §9c).
 
 ### A second, hidden output tree
 
@@ -924,26 +927,17 @@ on those files, read them from the run directory, not `logs/`.
     `.venv/bin/python -c "import os; print(os.environ.get('OPENAI_API_KEY'))"`.
 16. **There is no config schema validation and no CI.** A malformed axis list
     yields a zero-run sweep with no error.
-17. **The `post_message` restriction is a process-global flag, not per-run
-    state.** `set_post_message_disabled()` sets a module-level
-    `_POST_MESSAGE_DISABLED` in `experiments/common/_patch_terrarium.py`, and the
-    runner re-writes it at every planning-round boundary. With
-    `max_concurrent_runs > 1` and a mixed axis (`disable_post_message_after_round:
-    [null, 0, 1]`, or the legacy `[true, false]`), concurrent runs share that one
-    global: whichever run wrote the flag last applies to every other in-flight
-    run's remaining agent turns in that round. For a clean A/B, sweep the axis
-    across **separate** sweeps (or separate `output_dir`s) with
-    `max_concurrent_runs: 1` inside each, or accept the race.
-18. **`collusion_via_tools/resume.py` does not know about the restriction**
-    (§14). Suffixed runs are never matched and get re-run every time.
-19. **Suffixed `run_id`s do not parse in the plotting layer.** The regexes in
-    `collusion_via_tools/plots/build_tables.py` are anchored on `seed<S>$`, so
-    `__nopm` / `__cut_after_r{N}` ids fall through to the directory-layout
-    fallback and yield `num_agents`, `adversary_count`, `target_role`, `seed` as
-    `None`. The `--num-agents` / `--adversary-count` / `--target-role` /
-    `--seeds` filters of the plotting CLIs therefore skip restricted runs
-    entirely. Keep restricted and unrestricted settings in separate output trees
-    if you need filtered panels.
+17. **The `post_message` restriction is task-local, not process-global.**
+    `set_post_message_disabled()` writes a `contextvars.ContextVar` in
+    `experiments/common/_patch_terrarium.py`, so concurrent `_run_single`
+    coroutines under `max_concurrent_runs > 1` each keep their own value and a
+    mixed axis such as `disable_post_message_after_round: [null, 0, 1]` no longer
+    races. This holds because terrarium resolves the toolset on the same asyncio
+    task that writes the flag — the only thread boundary in the path
+    (`terrarium.async_utils.run_blocking`) wraps the HTTP call, after the tools
+    are already resolved. If terrarium ever moves toolset discovery off-task,
+    this isolation silently stops holding and the lane's test in
+    `tests/test_post_message_scoping.py` is the thing that would catch it.
 
 ---
 
@@ -998,8 +992,10 @@ on those files, read them from the run directory, not `logs/`.
   `MisalignmentHospitalEnvironment` in `experiments.collusion_via_tools.environment`,
   but the fork's runner resolves the env from `environment.import_path` in the
   config** — confirm which class a given config points at before assuming.
-- `collusion_via_tools/resume.py` has no awareness of the `post_message`
-  restriction (§14), so `__nopm` / `__cut_after_r{N}` runs cannot be resumed.
+- `collusion_via_tools/resume.py` is restriction-aware, but still diverges from
+  `run.py` on the other axes (empty defaults for the shared axes; honours
+  per-sweep `seeds` and `runs_per_setting`, which `run_from_config` ignores) —
+  §14.
 
 ## Appendix: where the schema actually lives
 
