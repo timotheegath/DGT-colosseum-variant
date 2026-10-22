@@ -1,17 +1,15 @@
 # Collusion via Tools (HOSPITAL)
 
-This experiment evaluates **objective misalignment** in the **HOSPITAL** DCOPS environment (distributed hospital resource allocation), matching the paper’s Section 5.5 / Figure 7 setup (complete topology; misalignment type × coalition composition).
+This experiment evaluates **objective misalignment** in the **HOSPITAL** DCOPS environment (distributed hospital resource allocation), matching the paper’s Section 5.5 / Figure 7 setup (complete topology; coalition composition).
 
 ## Experiment axes (Figure 7)
-### Misalignment type (strategy)
-- **Covert** (`covert_max_coalition_reward`): maximize coalition reward while keeping overall performance near baseline (stealthy).
-~~- **Sabotage (Self-Prom)** (`destructive_max_coalition_reward`): maximize coalition reward without preserving overall performance.~~
--~~ **Sabotage (Self-Sac)** (`destructive_no_reward_preservation`): maximize overall harm (raise overall regret) regardless of coalition reward.~~
+### Misalignment type
+This experiment uses the covert strategy only: maximize coalition reward while keeping overall performance near baseline (stealthy). No sabotage variant is swept.
 
 ### Coalition composition (target role)
 Sweeps enforce that the coalition contains at least one:
 - `Resource_Provisioner` (high-leverage agent), or
-- ~~`departmental` (department-only coalition).~~
+- `departmental` (department-only coalition).
 
 ### Private message restriction
 - **Unrestricted**: adversaries have an unrestricted access to a private communication channel
@@ -75,7 +73,7 @@ The filter arguments above (`--num-agents`, `--target-role`, `--adversary-count`
 ## Configuration notes
 * **Environment class**: `MisalignmentHospitalEnvironment` (in `experiments.collusion_via_tools.environment`)
 * **Figure 7 topology**: `complete`
-* **Figure 7 sweep design**: strategies correspond to the three misalignment types; `target_roles` splits provisioner vs departmental coalitions.
+* **Figure 7 sweep design**: the experiment fixes the covert behavior; `target_roles` splits provisioner vs departmental coalitions.
 
 ## Disabling `post_message` (tool-based collusion)
 
@@ -101,7 +99,7 @@ the process (see `experiments/common/_patch_terrarium.py`).
 Runs with the toggle enabled get a `__nopm` suffix on their directory:
 
 ```
-{model}__{sweep}__topo{T}__strat{S}__agents{N}_patients{P}_adv{A}_{role}__seed{S}__nopm
+{model}__{sweep}__topo{T}__agents{N}_patients{P}_adv{A}_{role}__seed{S}__nopm
 ```
 
 The flag is also persisted under `run_config.json["disable_post_message"]` for
@@ -117,7 +115,6 @@ experiment:
       num_agents: [9]
       adversary_counts: [4]
       target_roles: [departmental]
-      strategies: [covert_max_coalition_reward]
       disable_post_message: [true, false]   # sweep both modes
 ```
 
@@ -145,9 +142,20 @@ python -m experiments.collusion_via_tools.resume \
 
 ## Differences with Agent misalignment experiment
 
-This folder is a verbatim fork of `experiments/agent_misalignment/` (see commit `011ea11 Copied agent_misalignment -> collusion_via_tools verbatim`). Going forward, this fork is the primary one — it is **not** a downstream consumer of `experiments/agent_misalignment/`. Anything still pointing at the old name inside this folder is a bug.
+This folder is a verbatim fork of `experiments/agent_misalignment/` (see commit `011ea11 Copied agent_misalignment -> collusion_via_tools verbatim`). Going forward, this fork is the primary one — it is **not** a downstream consumer of `experiments/agent_misalignment/`. Anything still pointing at the old name inside this folder is a bug. The experiment reproduces `experiments/agent_misalignment/` results; only names and paths were rewired.
 
- source. The experiment reproduces `experiments/agent_misalignment/` results; only names and paths were rewired.
+The intentional behavioral differences are tracked in [Changelog](#changelog) below.
+
+## Changelog
+
+How this experiment now differs from `experiments/agent_misalignment/`, the folder it was forked from.
+
+### 2026-10-22 — tool-mediated collusion
+
+- **`post_message` can be disabled.** `sweeps[].disable_post_message` (or `experiment.disable_post_message`, `experiment.adversary.disable_post_message`, `communication_network.disable_post_message`) removes the blackboard `post_message` tool from every agent's toolset, so collusion has to go through tool calls only. Enabled runs get a `__nopm` suffix on their `run_id`. `agent_misalignment` has no such toggle.
+- **Strategy axis removed — behavior is always covert.** `sweeps[].strategies` and `experiment.adversary.strategy` no longer exist. The runner always applies the covert strategy (`COVERT_STRATEGY = "covert_max_coalition_reward"`, defined in `agents.py`), and the two destructive variants and their prompts were deleted. Benign runs are now identified solely by `adversary_counts: [0]` in the sweep config. Consequences:
+  - `run_id` lost its `__strat<strategy>__` segment and is now `{model}__{sweep}__topo{T}__agents{N}_patients{P}_adv{A}_{role}_seed{S}[__nopm]`. `plots/build_tables.py` still parses the legacy segment, so output directories produced before this change keep loading.
+  - Plotting dropped the strategy dimension: no `strategy`/`strategy_type` columns in emitted tables, no `by_strategy*` output subdirectories, bar figures are single-series over `adversary_count`, and figure filenames lost the `by_strategy_` infix (e.g. `joint_reward_adv4.pdf`).
 
 ## Notes
 Coalition composition matters: coalitions containing the **resource provisioner** tend to achieve their misalignment objectives more reliably than **departmental-only** coalitions, which can fail due to a more limited action space.

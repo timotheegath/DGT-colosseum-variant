@@ -6,12 +6,14 @@ from typing import Any, Optional, Set
 from terrarium.agents.base import BaseAgent
 
 
+COVERT_STRATEGY = "covert_max_coalition_reward"
+
+
 @dataclass(frozen=True, slots=True)
 class AdversarySpec:
     """Configuration for Misalignment/DoS Adversary."""
+
     adversary_names: Set[str]
-    attack_description: str
-    strategy_type: str
 
 
 class MisalignmentHospitalAgent(BaseAgent):

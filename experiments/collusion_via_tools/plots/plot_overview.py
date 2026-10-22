@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
 
@@ -13,7 +13,6 @@ import matplotlib.pyplot as plt
 from experiments.common.plotting.io_utils import (
     ensure_dir,
     finite,
-    groupby,
     mean,
     sem,
     sanitize_filename,
@@ -23,6 +22,9 @@ from experiments.common.plotting.logging_utils import log_saved_plot
 from experiments.common.plotting.style import apply_default_style
 
 logger = logging.getLogger(__name__)
+
+_ADVERSARY_BAR_COLOR = "#4c78a8"
+_BENIGN_BAR_COLOR = "#f58518"
 
 _STYLE = {
     "font.size": 24,
@@ -46,29 +48,13 @@ def _norm_role(value: Any) -> str:
     return str(value) if value is not None else "None"
 
 
-def _strategy_type(value: Any) -> str:
-    """
-    Coarsen strategy names for plotting.
-    """
-    s = (str(value) if value is not None else "").strip()
-    if not s or s == "none":
-        return "benign"
-    if s == "covert_max_coalition_reward":
-        return "covert"
-    if s == "destructive_max_coalition_reward":
-        return "destructive_max"
-    if s == "destructive_no_reward_preservation":
-        return "destructive_no_preservation"
-    return s
+def _adv_label(adversary_count: int) -> str:
+    """X tick label for an adversary count value (0 is the benign baseline)."""
+    return "Benign" if int(adversary_count) == 0 else str(int(adversary_count))
 
 
-def _strategy_label(strategy_type: str) -> str:
-    return {
-        "benign": "Benign",
-        "covert": "Covert",
-        "destructive_max": "Des (MCR)",
-        "destructive_no_preservation": "Des (NRP)",
-    }.get(strategy_type, strategy_type)
+def _bar_color(adversary_count: int) -> str:
+    return _BENIGN_BAR_COLOR if int(adversary_count) == 0 else _ADVERSARY_BAR_COLOR
 
 
 def _aggregate_metric(
@@ -101,7 +87,9 @@ def _filter_rows(
     return out
 
 
-def _filter_adv_count(rows: List[Dict[str, Any]], adversary_count: int) -> List[Dict[str, Any]]:
+def _filter_adv_count(
+    rows: List[Dict[str, Any]], adversary_count: int
+) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for r in rows:
         if _as_int(r.get("adversary_count")) != int(adversary_count):
@@ -110,7 +98,32 @@ def _filter_adv_count(rows: List[Dict[str, Any]], adversary_count: int) -> List[
     return out
 
 
-def _bar_across_strategies(
+def _rows_for_adversary_count(
+    main_rows: List[Dict[str, Any]],
+    benign_rows: List[Dict[str, Any]],
+    adversary_count: int,
+) -> List[Dict[str, Any]]:
+    """
+    Rows for a single adversary count value.
+
+    adversary_count == 0 is the benign baseline: it is taken from the main rows
+    when present, otherwise it falls back to the separately-run benign sweep
+    (benign_rows), when one was provided.
+    """
+    rows = _filter_adv_count(main_rows, int(adversary_count))
+    if not rows and int(adversary_count) == 0:
+        rows = _filter_adv_count(benign_rows, 0)
+    return rows
+
+
+def _default_when_missing(metric_key: str, adversary_count: int) -> Optional[float]:
+    # Coalition regret is undefined for the benign baseline (no coalition): treat as 0.
+    if int(adversary_count) == 0 and metric_key == "coalition_reward_regret":
+        return 0.0
+    return None
+
+
+def _bar_by_adversary_count(
     *,
     run_rows: List[Dict[str, Any]],
     benign_rows: List[Dict[str, Any]],
@@ -118,33 +131,23 @@ def _bar_across_strategies(
     metric_label: str,
     num_agents: int,
     target_role: str,
-    adversary_count: int,
+    adv_counts: Sequence[int],
     out_path: Path,
     emit_artifacts: bool = True,
 ) -> None:
     """
-    Bar plot across strategy types for a fixed adversary_count, plus a benign baseline bar.
+    Single-series bar plot: one bar per adversary count value present.
+
+    adversary_count == 0 is the benign baseline bar; when the main rows carry no
+    adversary_count == 0 runs, the separately-run benign sweep (benign_rows) is
+    overlaid in its place.
     """
     apply_default_style(plt)
     plt.rcParams.update(_STYLE)
     ensure_dir(out_path.parent)
 
     main = _filter_rows(run_rows, num_agents=num_agents, target_role=target_role)
-    main = _filter_adv_count(main, adversary_count)
     base = _filter_rows(benign_rows, num_agents=num_agents, target_role=target_role)
-    base = _filter_adv_count(base, 0)
-
-    order = ["benign", "covert", "destructive_max", "destructive_no_preservation"]
-    colors = {
-        "benign": "#f58518",
-        "covert": "#4c78a8",
-        "destructive_max": "#e45756",
-        "destructive_no_preservation": "#72b7b2",
-    }
-
-    grouped_main = groupby(main, ("strategy",))
-    # Baseline grouped separately (strategy is often "none" in benign config)
-    baseline_mean, baseline_sem, baseline_n = _aggregate_metric(base, metric_key=metric_key)
 
     xs: List[int] = []
     heights: List[float] = []
@@ -154,53 +157,41 @@ def _bar_across_strategies(
 
     artifact_rows: List[Dict[str, Any]] = []
 
-    for i, stype in enumerate(order):
-        rows_for_stype: List[Dict[str, Any]] = []
-        if stype == "benign":
-            rows_for_stype = base
-        else:
-            # Pull from all raw strategies that map to this type.
-            for (raw_strategy,), rs in grouped_main.items():
-                if _strategy_type(raw_strategy) == stype:
-                    rows_for_stype.extend(rs)
+    for ac in sorted({int(a) for a in adv_counts}):
+        rows_for_ac = _rows_for_adversary_count(main, base, int(ac))
 
         # Artifact: raw points used for this bar.
-        for r in rows_for_stype:
+        for r in rows_for_ac:
             v = r.get(metric_key)
             if v is None:
                 continue
             artifact_rows.append(
                 {
-                    "plot_type": "bar_across_strategies",
+                    "plot_type": "bar_by_adversary_count",
                     "plot_metric_key": metric_key,
                     "plot_metric_label": metric_label,
                     "num_agents": num_agents,
                     "target_role": target_role,
-                    "adversary_count": adversary_count,
-                    "strategy_type": stype,
-                    "raw_strategy": r.get("strategy"),
-                    "group": "benign" if stype == "benign" else "main",
+                    "adversary_count": int(ac),
+                    "group": "benign" if int(ac) == 0 else "main",
                     "value": v,
                     "run_id": r.get("run_id"),
                     "seed": r.get("seed"),
                 }
             )
 
-        default_when_missing = None
-        if stype == "benign" and metric_key == "coalition_reward_regret":
-            default_when_missing = 0.0
         m, e, n = _aggregate_metric(
-            rows_for_stype,
+            rows_for_ac,
             metric_key=metric_key,
-            default_when_missing=default_when_missing,
+            default_when_missing=_default_when_missing(metric_key, int(ac)),
         )
         if m is None:
             continue
-        xs.append(i)
+        xs.append(int(ac))
         heights.append(float(m))
         yerrs.append(float(e or 0.0))
-        labels.append(_strategy_label(stype))
-        bar_colors.append(colors.get(stype, "#999999"))
+        labels.append(_adv_label(int(ac)))
+        bar_colors.append(_bar_color(int(ac)))
 
     if not xs:
         return
@@ -214,6 +205,7 @@ def _bar_across_strategies(
             ax.plot([x], [0.0], marker="_", markersize=18, color=c, zorder=6)
     ax.set_xticks(xs)
     ax.set_xticklabels(labels, rotation=0, ha="center")
+    ax.set_xlabel("Adversary Count")
     ax.set_ylabel(metric_label)
 
     fig.tight_layout()
@@ -284,8 +276,6 @@ def main() -> None:
         raise SystemExit("No rows in CSV")
 
     metric_label = str(rows[0].get("plot_metric_label") or {metric_label!r})
-    # Preserve ordering used in the main plot.
-    order = ["benign", "covert", "destructive_max", "destructive_no_preservation"]
 
     fig, ax = plt.subplots(figsize=(9.2, 4.4))
     ax.grid(False)
@@ -294,26 +284,31 @@ def main() -> None:
     heights: List[float] = []
     yerrs: List[float] = []
     labels: List[str] = []
-    colors = {{
-        "benign": "#f58518",
-        "covert": "#4c78a8",
-        "destructive_max": "#e45756",
-        "destructive_no_preservation": "#72b7b2",
-    }}
+    colors: List[str] = []
 
-    for i, stype in enumerate(order):
-        vals = _finite([r.get("value") for r in rows if str(r.get("strategy_type")) == stype])
+    advs = sorted({{int(float(r.get("adversary_count") or 0)) for r in rows}})
+    for ac in advs:
+        vals = _finite(
+            [
+                r.get("value")
+                for r in rows
+                if int(float(r.get("adversary_count") or 0)) == int(ac)
+            ]
+        )
         if not vals:
             continue
-        xs.append(i)
+        xs.append(int(ac))
         heights.append(float(_mean(vals) or 0.0))
         yerrs.append(float(_sem(vals)))
-        labels.append(stype.replace("_", " "))
-        ax.scatter([float(i)] * len(vals), vals, s=16, alpha=0.25, color=colors.get(stype, "#999999"))
+        labels.append("Benign" if int(ac) == 0 else str(int(ac)))
+        color = "#f58518" if int(ac) == 0 else "#4c78a8"
+        colors.append(color)
+        ax.scatter([float(ac)] * len(vals), vals, s=16, alpha=0.25, color=color)
 
-    ax.bar(xs, heights, yerr=yerrs, capsize=3, color=[colors.get(order[i], "#999999") for i in xs], alpha=0.9)
+    ax.bar(xs, heights, yerr=yerrs, capsize=3, color=colors, alpha=0.9)
     ax.set_xticks(xs)
     ax.set_xticklabels(labels, rotation=0, ha="center")
+    ax.set_xlabel("Adversary Count")
     ax.set_ylabel(metric_label)
 
     fig.tight_layout()
@@ -341,7 +336,11 @@ def _lines_over_adversary_count(
     emit_artifacts: bool = True,
 ) -> None:
     """
-    Line plot: x=adversary_count (including 0 benign), separate line per strategy type.
+    Line plot: x=adversary_count, a single line over adversary count.
+
+    adversary_count == 0 is the benign baseline point; when the main rows carry
+    no adversary_count == 0 runs, the separately-run benign sweep (benign_rows)
+    is overlaid in its place, so the benign point is kept when available.
     """
     apply_default_style(plt)
     plt.rcParams.update(_STYLE)
@@ -350,48 +349,27 @@ def _lines_over_adversary_count(
     main = _filter_rows(run_rows, num_agents=num_agents, target_role=target_role)
     base = _filter_rows(benign_rows, num_agents=num_agents, target_role=target_role)
 
-    # Build points per strategy type.
-    strategies = ["benign", "covert", "destructive_max", "destructive_no_preservation"]
-    colors = {
-        "benign": "#f58518",
-        "covert": "#4c78a8",
-        "destructive_max": "#e45756",
-        "destructive_no_preservation": "#72b7b2",
-    }
-
     fig, ax = plt.subplots(figsize=(7.6, 4.4))
     ax.grid(False)
 
-    for stype in strategies:
-        xs: List[int] = []
-        ys: List[float] = []
-        es: List[float] = []
+    xs: List[int] = []
+    ys: List[float] = []
+    es: List[float] = []
 
-        for ac in adv_counts:
-            if stype == "benign":
-                if ac != 0:
-                    continue
-                rows = _filter_adv_count(base, 0)
-            else:
-                rows = _filter_adv_count(main, ac)
-                rows = [r for r in rows if _strategy_type(r.get("strategy")) == stype]
-
-            default_when_missing = None
-            if stype == "benign" and metric_key == "coalition_reward_regret":
-                default_when_missing = 0.0
-            m, e, n = _aggregate_metric(
-                rows,
-                metric_key=metric_key,
-                default_when_missing=default_when_missing,
-            )
-            if m is None:
-                continue
-            xs.append(int(ac))
-            ys.append(float(m))
-            es.append(float(e or 0.0))
-
-        if not xs:
+    for ac in sorted({int(a) for a in adv_counts}):
+        rows_for_ac = _rows_for_adversary_count(main, base, int(ac))
+        m, e, n = _aggregate_metric(
+            rows_for_ac,
+            metric_key=metric_key,
+            default_when_missing=_default_when_missing(metric_key, int(ac)),
+        )
+        if m is None:
             continue
+        xs.append(int(ac))
+        ys.append(float(m))
+        es.append(float(e or 0.0))
+
+    if xs:
         ax.errorbar(
             xs,
             ys,
@@ -402,14 +380,12 @@ def _lines_over_adversary_count(
             elinewidth=2.0,
             capthick=2.0,
             capsize=3,
-            color=colors.get(stype, "#999999"),
-            label=_strategy_label(stype),
+            color=_ADVERSARY_BAR_COLOR,
         )
 
     ax.set_xlabel("Adversary Count")
     ax.set_ylabel(metric_label)
-    ax.set_xticks(sorted(set(int(a) for a in adv_counts)))
-    ax.legend(loc="best")
+    ax.set_xticks(sorted({int(a) for a in adv_counts}))
 
     fig.tight_layout()
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
@@ -424,40 +400,26 @@ def _lines_over_adversary_count(
     script_path = out_path.with_name(out_path.stem + "__replot.py")
 
     artifact_rows: List[Dict[str, Any]] = []
-    for stype in strategies:
-        for ac in adv_counts:
-            if stype == "benign":
-                if int(ac) != 0:
-                    continue
-                rows = _filter_adv_count(base, 0)
-            else:
-                rows = _filter_adv_count(main, int(ac))
-                rows = [r for r in rows if _strategy_type(r.get("strategy")) == stype]
-
-            default_when_missing = None
-            if stype == "benign" and metric_key == "coalition_reward_regret":
-                default_when_missing = 0.0
-
-            for r in rows:
-                v = r.get(metric_key)
-                if v is None:
-                    continue
-                artifact_rows.append(
-                    {
-                        "plot_type": "lines_over_adversary_count",
-                        "plot_metric_key": metric_key,
-                        "plot_metric_label": metric_label,
-                        "num_agents": num_agents,
-                        "target_role": target_role,
-                        "strategy_type": stype,
-                        "adversary_count": int(ac),
-                        "raw_strategy": r.get("strategy"),
-                        "group": "benign" if stype == "benign" else "main",
-                        "value": v,
-                        "run_id": r.get("run_id"),
-                        "seed": r.get("seed"),
-                    }
-                )
+    for ac in sorted({int(a) for a in adv_counts}):
+        rows_for_ac = _rows_for_adversary_count(main, base, int(ac))
+        for r in rows_for_ac:
+            v = r.get(metric_key)
+            if v is None:
+                continue
+            artifact_rows.append(
+                {
+                    "plot_type": "lines_over_adversary_count",
+                    "plot_metric_key": metric_key,
+                    "plot_metric_label": metric_label,
+                    "num_agents": num_agents,
+                    "target_role": target_role,
+                    "adversary_count": int(ac),
+                    "group": "benign" if int(ac) == 0 else "main",
+                    "value": v,
+                    "run_id": r.get("run_id"),
+                    "seed": r.get("seed"),
+                }
+            )
 
     write_csv(csv_path, artifact_rows)
 
@@ -518,34 +480,29 @@ def main() -> None:
 
     metric_label = str(rows[0].get("plot_metric_label") or {metric_label!r})
 
-    strategies = ["benign", "covert", "destructive_max", "destructive_no_preservation"]
-    colors = {{
-        "benign": "#f58518",
-        "covert": "#4c78a8",
-        "destructive_max": "#e45756",
-        "destructive_no_preservation": "#72b7b2",
-    }}
-
     fig, ax = plt.subplots(figsize=(7.6, 4.4))
     ax.grid(False)
 
-    for stype in strategies:
-        pts = [r for r in rows if str(r.get("strategy_type")) == stype]
-        if not pts:
+    xs: List[int] = []
+    ys: List[float] = []
+    es: List[float] = []
+
+    advs = sorted({{int(float(r.get("adversary_count") or 0)) for r in rows}})
+    for ac in advs:
+        vals = _finite(
+            [
+                r.get("value")
+                for r in rows
+                if int(float(r.get("adversary_count") or 0)) == int(ac)
+            ]
+        )
+        if not vals:
             continue
-        advs = sorted(set(int(float(r.get("adversary_count") or 0)) for r in pts))
-        xs: List[int] = []
-        ys: List[float] = []
-        es: List[float] = []
-        for ac in advs:
-            vals = _finite([r.get("value") for r in pts if int(float(r.get("adversary_count") or 0)) == int(ac)])
-            if not vals:
-                continue
-            xs.append(int(ac))
-            ys.append(float(_mean(vals) or 0.0))
-            es.append(float(_sem(vals)))
-        if not xs:
-            continue
+        xs.append(int(ac))
+        ys.append(float(_mean(vals) or 0.0))
+        es.append(float(_sem(vals)))
+
+    if xs:
         ax.errorbar(
             xs,
             ys,
@@ -556,13 +513,12 @@ def main() -> None:
             elinewidth=2.0,
             capthick=2.0,
             capsize=3,
-            color=colors.get(stype, "#999999"),
-            label=stype.replace("_", " "),
+            color="#4c78a8",
         )
 
     ax.set_xlabel("Adversary Count")
     ax.set_ylabel(metric_label)
-    ax.legend(loc="best")
+    ax.set_xticks(advs)
 
     fig.tight_layout()
     out_pdf = here / {out_path.name!r}
@@ -590,8 +546,9 @@ def plot_overview(
 ) -> None:
     """
     Produces:
-      - bar plots across strategy types (per adv_count in {2,4,8} + benign baseline)
-      - line plots over adversary_count (0,2,4,8) with separate lines per strategy type
+      - bar plots by adversary count (per adv_count in {2,4,8}, with the benign
+        baseline bar at adversary_count 0 overlaid from the benign sweep)
+      - line plots over adversary_count (0,2,4,8), one line per (target_role, num_agents)
     Stratified by:
       - target_role (departmental vs Resource_Provisioner)
       - num_agents (requested sweep value)
@@ -599,8 +556,16 @@ def plot_overview(
     ensure_dir(out_dir)
     benign_run_rows = benign_run_rows or []
 
-    roles = sorted({_norm_role(r.get("target_role")) for r in run_rows if r.get("target_role") is not None})
-    num_agents_vals = sorted({int(r.get("num_agents")) for r in run_rows if r.get("num_agents") is not None})
+    roles = sorted(
+        {
+            _norm_role(r.get("target_role"))
+            for r in run_rows
+            if r.get("target_role") is not None
+        }
+    )
+    num_agents_vals = sorted(
+        {int(r.get("num_agents")) for r in run_rows if r.get("num_agents") is not None}
+    )
 
     if not roles or not num_agents_vals:
         return
@@ -652,7 +617,8 @@ def plot_overview(
                 num_agents=int(n),
                 target_role=role,
                 adv_counts=spec.adv_counts,
-                out_path=n_dir / "coalition_advantage_hospital_level_actual_vs_adv_count.pdf",
+                out_path=n_dir
+                / "coalition_advantage_hospital_level_actual_vs_adv_count.pdf",
             )
             _lines_over_adversary_count(
                 run_rows=run_rows,
@@ -662,7 +628,8 @@ def plot_overview(
                 num_agents=int(n),
                 target_role=role,
                 adv_counts=spec.adv_counts,
-                out_path=n_dir / "coalition_advantage_hospital_adjusted_vs_adv_count.pdf",
+                out_path=n_dir
+                / "coalition_advantage_hospital_adjusted_vs_adv_count.pdf",
             )
             _lines_over_adversary_count(
                 run_rows=run_rows,
@@ -724,169 +691,168 @@ def plot_overview(
                 num_agents=int(n),
                 target_role=role,
                 adv_counts=spec.adv_counts,
-                out_path=n_dir / "resource_failure_penalty_total_agent_attributed_vs_adv_count.pdf",
+                out_path=n_dir
+                / "resource_failure_penalty_total_agent_attributed_vs_adv_count.pdf",
             )
 
-            # Bar plots across strategy types, per adversary count (2/4/8).
+            # Bar plots by adversary count: the benign baseline (adversary_count 0,
+            # overlaid from the benign sweep when available) plus the adversary bar.
             for ac in [a for a in spec.adv_counts if a != 0]:
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="joint_reward",
                     metric_label="Joint Reward",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
-                    out_path=n_dir / f"joint_reward_by_strategy_adv{int(ac)}.pdf",
+                    adv_counts=(0, int(ac)),
+                    out_path=n_dir / f"joint_reward_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="coalition_minus_noncoalition_avg",
                     metric_label="Coalition Advantage",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
-                    out_path=n_dir / f"coalition_advantage_by_strategy_adv{int(ac)}.pdf",
+                    adv_counts=(0, int(ac)),
+                    out_path=n_dir / f"coalition_advantage_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="coalition_minus_noncoalition_hospital_avg",
                     metric_label="Coalition Advantage",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
+                    adv_counts=(0, int(ac)),
                     out_path=n_dir
-                    / f"coalition_advantage_hospital_level_by_strategy_adv{int(ac)}.pdf",
+                    / f"coalition_advantage_hospital_level_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="coalition_minus_noncoalition_hospital_avg_actual",
                     metric_label="Coalition Advantage",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
+                    adv_counts=(0, int(ac)),
                     out_path=n_dir
-                    / f"coalition_advantage_hospital_level_actual_by_strategy_adv{int(ac)}.pdf",
+                    / f"coalition_advantage_hospital_level_actual_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="coalition_minus_noncoalition_avg_hospital_adjusted",
                     metric_label="Coalition Advantage",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
+                    adv_counts=(0, int(ac)),
                     out_path=n_dir
-                    / f"coalition_advantage_hospital_adjusted_by_strategy_adv{int(ac)}.pdf",
+                    / f"coalition_advantage_hospital_adjusted_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="coalition_minus_noncoalition_avg_hospital_adjusted_normalized",
                     metric_label="Coalition Advantage",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
+                    adv_counts=(0, int(ac)),
                     out_path=n_dir
-                    / f"coalition_advantage_hospital_adjusted_normalized_by_strategy_adv{int(ac)}.pdf",
+                    / f"coalition_advantage_hospital_adjusted_normalized_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="coalition_minus_noncoalition_hospital_avg_hospital_adjusted_normalized",
                     metric_label="Coalition Advantage",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
+                    adv_counts=(0, int(ac)),
                     out_path=n_dir
-                    / f"coalition_advantage_hospital_level_hospital_adjusted_normalized_by_strategy_adv{int(ac)}.pdf",
+                    / f"coalition_advantage_hospital_level_hospital_adjusted_normalized_adv{int(ac)}.pdf",
                 )
 
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="hospital_holding_cost_total",
                     metric_label="Holding Cost",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
-                    out_path=n_dir / f"holding_cost_total_by_strategy_adv{int(ac)}.pdf",
+                    adv_counts=(0, int(ac)),
+                    out_path=n_dir / f"holding_cost_total_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="hospital_resource_failure_penalty_total",
                     metric_label="Resource Failure Penalty",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
-                    out_path=n_dir
-                    / f"resource_failure_penalty_total_by_strategy_adv{int(ac)}.pdf",
+                    adv_counts=(0, int(ac)),
+                    out_path=n_dir / f"resource_failure_penalty_total_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="agent_resource_failure_penalty_total",
                     metric_label="Resource Failure Penalty",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
+                    adv_counts=(0, int(ac)),
                     out_path=n_dir
-                    / f"resource_failure_penalty_total_agent_attributed_by_strategy_adv{int(ac)}.pdf",
+                    / f"resource_failure_penalty_total_agent_attributed_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="hospital_missed_step_penalty_total",
                     metric_label="Missed-Step Penalty",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
-                    out_path=n_dir
-                    / f"missed_step_penalty_total_by_strategy_adv{int(ac)}.pdf",
+                    adv_counts=(0, int(ac)),
+                    out_path=n_dir / f"missed_step_penalty_total_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="joint_reward_regret",
                     metric_label="Overall Regret",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
-                    out_path=n_dir / f"overall_regret_by_strategy_adv{int(ac)}.pdf",
+                    adv_counts=(0, int(ac)),
+                    out_path=n_dir / f"overall_regret_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="joint_reward_regret_normalized",
                     metric_label="Overall Regret",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
-                    out_path=n_dir
-                    / f"overall_regret_normalized_by_strategy_adv{int(ac)}.pdf",
+                    adv_counts=(0, int(ac)),
+                    out_path=n_dir / f"overall_regret_normalized_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="coalition_reward_regret",
                     metric_label="Coalition Regret",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
-                    out_path=n_dir / f"coalition_regret_by_strategy_adv{int(ac)}.pdf",
+                    adv_counts=(0, int(ac)),
+                    out_path=n_dir / f"coalition_regret_adv{int(ac)}.pdf",
                 )
-                _bar_across_strategies(
+                _bar_by_adversary_count(
                     run_rows=run_rows,
                     benign_rows=benign_run_rows,
                     metric_key="coalition_reward_regret_hospital_adjusted",
                     metric_label="Coalition Regret",
                     num_agents=int(n),
                     target_role=role,
-                    adversary_count=int(ac),
+                    adv_counts=(0, int(ac)),
                     out_path=n_dir
-                    / f"coalition_regret_hospital_adjusted_by_strategy_adv{int(ac)}.pdf",
+                    / f"coalition_regret_hospital_adjusted_adv{int(ac)}.pdf",
                 )

@@ -77,22 +77,6 @@ def _filter_rows_by_int(rows: List[dict], key: str, value: int) -> List[dict]:
 def _filter_rows_by_str(rows: List[dict], key: str, value: str) -> List[dict]:
     return [r for r in rows if str(r.get(key)) == str(value)]
 
-def _strategy_type3(value: object) -> str:
-    """
-    Coarsen strategy to three buckets for stratified plots:
-      - benign: "none" / missing
-      - covert: covert_max_coalition_reward
-      - destructive: destructive_* variants
-    """
-    s = (str(value) if value is not None else "").strip()
-    if not s or s == "none":
-        return "benign"
-    if s == "covert_max_coalition_reward":
-        return "covert"
-    if s.startswith("destructive_"):
-        return "destructive"
-    return s
-
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
@@ -211,14 +195,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     mismatch_counts = {"num_agents": 0, "adversary_count": 0}
     for r in tables.run_rows:
         try:
-            req_n = int(r.get("num_agents")) if r.get("num_agents") is not None else None
-            act_n = int(r.get("actual_num_agents")) if r.get("actual_num_agents") is not None else None
+            req_n = (
+                int(r.get("num_agents")) if r.get("num_agents") is not None else None
+            )
+            act_n = (
+                int(r.get("actual_num_agents"))
+                if r.get("actual_num_agents") is not None
+                else None
+            )
         except Exception:
             req_n, act_n = None, None
         if req_n is not None and act_n is not None and req_n != act_n:
             mismatch_counts["num_agents"] += 1
         try:
-            req_a = int(r.get("adversary_count")) if r.get("adversary_count") is not None else None
+            req_a = (
+                int(r.get("adversary_count"))
+                if r.get("adversary_count") is not None
+                else None
+            )
             act_a = (
                 int(r.get("actual_adversary_count"))
                 if r.get("actual_adversary_count") is not None
@@ -276,55 +270,49 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     # Stratified: separate plot sets per sweep "combination".
-    # Combination here means (strategy, target_role, num_agents), plotted over adversary_count.
+    # Combination here means (target_role, num_agents), plotted over adversary_count.
     combos = sorted(
         {
             (
-                str(r.get("strategy")),
                 str(r.get("target_role")),
                 int(r.get("num_agents")),
             )
             for r in tables.run_rows
-            if r.get("strategy") is not None
-            and r.get("target_role") is not None
-            and r.get("num_agents") is not None
+            if r.get("target_role") is not None and r.get("num_agents") is not None
         }
     )
     if combos:
         by_combo_root = sweep_out / "by_combo"
         ensure_dir(by_combo_root)
-        for strat, role, n_agents in combos:
+        for role, n_agents in combos:
             combo_run_rows = [
                 r
                 for r in tables.run_rows
-                if str(r.get("strategy")) == strat
-                and str(r.get("target_role")) == role
+                if str(r.get("target_role")) == role
                 and int(r.get("num_agents")) == int(n_agents)
             ]
             combo_agent_rows = [
                 r
                 for r in tables.agent_rows
-                if str(r.get("strategy")) == strat
-                and str(r.get("target_role")) == role
+                if str(r.get("target_role")) == role
                 and int(r.get("num_agents")) == int(n_agents)
             ]
             if not combo_run_rows:
                 continue
-            combo_out = (
-                by_combo_root
-                / sanitize_filename(strat)
-                / sanitize_filename(role)
-                / f"n{int(n_agents)}"
-            )
+            combo_out = by_combo_root / sanitize_filename(role) / f"n{int(n_agents)}"
             ensure_dir(combo_out)
             plot_sweep_metrics(
                 run_rows=combo_run_rows,
                 agent_rows=combo_agent_rows,
                 out_dir=combo_out,
-                baseline_run_rows=_filter_rows_by_int(benign_tables.run_rows, "num_agents", int(n_agents))
+                baseline_run_rows=_filter_rows_by_int(
+                    benign_tables.run_rows, "num_agents", int(n_agents)
+                )
                 if benign_tables
                 else None,
-                baseline_agent_rows=_filter_rows_by_int(benign_tables.agent_rows, "num_agents", int(n_agents))
+                baseline_agent_rows=_filter_rows_by_int(
+                    benign_tables.agent_rows, "num_agents", int(n_agents)
+                )
                 if benign_tables
                 else None,
                 baseline_label=str(args.benign_label),
@@ -343,7 +331,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         ensure_dir(by_agents_root)
         for n_agents in agent_counts:
             n_run_rows = _filter_rows_by_int(tables.run_rows, "num_agents", n_agents)
-            n_agent_rows = _filter_rows_by_int(tables.agent_rows, "num_agents", n_agents)
+            n_agent_rows = _filter_rows_by_int(
+                tables.agent_rows, "num_agents", n_agents
+            )
             if not n_run_rows:
                 continue
             n_out = by_agents_root / f"n{n_agents}"
@@ -352,107 +342,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 run_rows=n_run_rows,
                 agent_rows=n_agent_rows,
                 out_dir=n_out,
-                baseline_run_rows=_filter_rows_by_int(benign_tables.run_rows, "num_agents", n_agents)
-                if benign_tables
-                else None,
-                baseline_agent_rows=_filter_rows_by_int(benign_tables.agent_rows, "num_agents", n_agents)
-                if benign_tables
-                else None,
-                baseline_label=str(args.benign_label),
-            )
-
-            # Further stratify by coarse strategy type (benign/covert/destructive).
-            stypes = sorted({_strategy_type3(r.get("strategy")) for r in n_run_rows if r.get("strategy") is not None})
-            if benign_tables:
-                # Also allow benign-only plots (baseline overlay isn't enough if you want a pure benign panel).
-                stypes = sorted(set(stypes) | {"benign"})
-            by_stype_root = n_out / "by_strategy_type"
-            ensure_dir(by_stype_root)
-            for st in stypes:
-                st_run_rows = [r for r in n_run_rows if _strategy_type3(r.get("strategy")) == st]
-                st_agent_rows = [r for r in n_agent_rows if _strategy_type3(r.get("strategy")) == st]
-                if st == "benign" and benign_tables:
-                    st_run_rows = []
-                    st_agent_rows = []
-                if not st_run_rows and st != "benign":
-                    continue
-                st_out = by_stype_root / sanitize_filename(st)
-                ensure_dir(st_out)
-                plot_sweep_metrics(
-                    run_rows=st_run_rows,
-                    agent_rows=st_agent_rows,
-                    out_dir=st_out,
-                    baseline_run_rows=_filter_rows_by_int(benign_tables.run_rows, "num_agents", n_agents)
-                    if benign_tables
-                    else None,
-                    baseline_agent_rows=_filter_rows_by_int(benign_tables.agent_rows, "num_agents", n_agents)
-                    if benign_tables
-                    else None,
-                    baseline_label=str(args.benign_label),
+                baseline_run_rows=_filter_rows_by_int(
+                    benign_tables.run_rows, "num_agents", n_agents
                 )
-
-    # Stratified: separate plot sets per adversarial strategy.
-    strategies = sorted(
-        {
-            str(r.get("strategy"))
-            for r in tables.run_rows
-            if r.get("strategy") is not None and str(r.get("strategy")).strip()
-        }
-    )
-    if strategies:
-        by_strat_root = sweep_out / "by_strategy"
-        ensure_dir(by_strat_root)
-        for strat in strategies:
-            strat_run_rows = [r for r in tables.run_rows if str(r.get("strategy")) == strat]
-            strat_agent_rows = [r for r in tables.agent_rows if str(r.get("strategy")) == strat]
-            if not strat_run_rows:
-                continue
-            strat_out = by_strat_root / sanitize_filename(strat)
-            ensure_dir(strat_out)
-            plot_sweep_metrics(
-                run_rows=strat_run_rows,
-                agent_rows=strat_agent_rows,
-                out_dir=strat_out,
-                baseline_run_rows=benign_tables.run_rows if benign_tables else None,
-                baseline_agent_rows=benign_tables.agent_rows if benign_tables else None,
+                if benign_tables
+                else None,
+                baseline_agent_rows=_filter_rows_by_int(
+                    benign_tables.agent_rows, "num_agents", n_agents
+                )
+                if benign_tables
+                else None,
                 baseline_label=str(args.benign_label),
             )
 
-            strat_agent_counts = sorted(
-                {
-                    int(r.get("num_agents"))
-                    for r in strat_run_rows
-                    if r.get("num_agents") is not None
-                }
-            )
-            if strat_agent_counts:
-                strat_by_agents_root = strat_out / "by_num_agents"
-                ensure_dir(strat_by_agents_root)
-                for n_agents in strat_agent_counts:
-                    n_run_rows = _filter_rows_by_int(strat_run_rows, "num_agents", n_agents)
-                    n_agent_rows = _filter_rows_by_int(strat_agent_rows, "num_agents", n_agents)
-                    if not n_run_rows:
-                        continue
-                    n_out = strat_by_agents_root / f"n{n_agents}"
-                    ensure_dir(n_out)
-                    plot_sweep_metrics(
-                        run_rows=n_run_rows,
-                        agent_rows=n_agent_rows,
-                        out_dir=n_out,
-                        baseline_run_rows=_filter_rows_by_int(
-                            benign_tables.run_rows, "num_agents", n_agents
-                        )
-                        if benign_tables
-                        else None,
-                        baseline_agent_rows=_filter_rows_by_int(
-                            benign_tables.agent_rows, "num_agents", n_agents
-                        )
-                        if benign_tables
-                        else None,
-                        baseline_label=str(args.benign_label),
-                    )
-
-    return 0
+    # NOTE: per-run-config (arm) stratification was removed; runs are now
+    # stratified by target_role / num_agents (see by_combo / by_num_agents above).
 
 
 if __name__ == "__main__":

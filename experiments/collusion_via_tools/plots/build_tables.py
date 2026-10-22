@@ -21,7 +21,7 @@ _RUN_ID_RE_V2 = re.compile(
     ^(?P<model>.+?)__                           # model label
     (?P<sweep>.+?)__                            # sweep name
     topo(?P<topology>.+?)__                     # topo<...>
-    strat(?P<strategy>.+?)__                    # strat<...>
+    (?:strat(?P<strategy>.+?)__)?               # legacy optional strat<...> segment
     agents(?P<num_agents>\d+)_                  # agentsN
     patients(?P<num_patients>\d+)_              # patientsP
     adv(?P<adversary_count>\d+)_                # advK
@@ -71,7 +71,6 @@ def _infer_run_fields(run_dir: Path, run_config: Dict[str, Any]) -> Dict[str, An
                 "model_label": m.group("model"),
                 "sweep_name": m.group("sweep"),
                 "topology": m.groupdict().get("topology"),
-                "strategy": m.groupdict().get("strategy"),
                 "requested_num_agents": requested_num_agents,
                 "num_patients": as_int(m.groupdict().get("num_patients")),
                 "requested_adversary_count": requested_adversary_count,
@@ -159,7 +158,6 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
                 "requested_adversary_count": inferred.get("requested_adversary_count"),
                 "actual_adversary_count": inferred.get("actual_adversary_count"),
                 "target_role": inferred.get("target_role"),
-                "strategy": inferred.get("strategy"),
                 "seed": inferred.get("seed"),
                 "status": fs.get("status"),
                 "attack_type": metrics.get("attack_type"),
@@ -192,16 +190,22 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
                     metrics.get("coalition_minus_noncoalition_avg_hospital_adjusted")
                 ),
                 "coalition_minus_noncoalition_avg_hospital_adjusted_normalized": as_float(
-                    metrics.get("coalition_minus_noncoalition_avg_hospital_adjusted_normalized")
+                    metrics.get(
+                        "coalition_minus_noncoalition_avg_hospital_adjusted_normalized"
+                    )
                 ),
                 "coalition_minus_noncoalition_hospital_avg": as_float(
                     metrics.get("coalition_minus_noncoalition_hospital_avg")
                 ),
                 "coalition_minus_noncoalition_hospital_avg_hospital_adjusted": as_float(
-                    metrics.get("coalition_minus_noncoalition_hospital_avg_hospital_adjusted")
+                    metrics.get(
+                        "coalition_minus_noncoalition_hospital_avg_hospital_adjusted"
+                    )
                 ),
                 "coalition_minus_noncoalition_hospital_avg_hospital_adjusted_normalized": as_float(
-                    metrics.get("coalition_minus_noncoalition_hospital_avg_hospital_adjusted_normalized")
+                    metrics.get(
+                        "coalition_minus_noncoalition_hospital_avg_hospital_adjusted_normalized"
+                    )
                 ),
                 "coalition_minus_noncoalition_hospital_avg_actual": as_float(
                     metrics.get("coalition_minus_noncoalition_hospital_avg_actual")
@@ -226,11 +230,12 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
                 "meeting_outcome_variables_assigned": as_int(
                     meeting.get("variables_assigned")
                 ),
-                "meeting_outcome_total_variables": as_int(meeting.get("total_variables")),
+                "meeting_outcome_total_variables": as_int(
+                    meeting.get("total_variables")
+                ),
                 "graph_density": as_float(graph.get("density")),
                 "graph_avg_degree": as_float(graph.get("avg_degree")),
                 "graph_avg_clustering": as_float(graph.get("avg_clustering")),
-
                 # Upper bound "global optimum" (no solver) + regret values.
                 "max_joint_reward": as_float(metrics.get("max_joint_reward"))
                 if metrics.get("max_joint_reward") is not None
@@ -240,10 +245,16 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
                     else None
                 ),
                 "joint_reward_regret": as_float(metrics.get("joint_reward_regret")),
-                "coalition_max_reward_sum": as_float(metrics.get("coalition_max_reward_sum")),
+                "coalition_max_reward_sum": as_float(
+                    metrics.get("coalition_max_reward_sum")
+                ),
                 "coalition_reward_sum": as_float(metrics.get("coalition_reward_sum")),
-                "noncoalition_reward_sum": as_float(metrics.get("noncoalition_reward_sum")),
-                "coalition_reward_regret": as_float(metrics.get("coalition_reward_regret")),
+                "noncoalition_reward_sum": as_float(
+                    metrics.get("noncoalition_reward_sum")
+                ),
+                "coalition_reward_regret": as_float(
+                    metrics.get("coalition_reward_regret")
+                ),
                 "coalition_reward_regret_hospital_adjusted": as_float(
                     metrics.get("coalition_reward_regret_hospital_adjusted")
                 ),
@@ -270,9 +281,13 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
         if mjr not in (None, 0, 0.0):
             try:
                 if jr is not None:
-                    row["joint_reward_regret_normalized"] = max(0.0, 1.0 - (float(jr) / float(mjr)))
+                    row["joint_reward_regret_normalized"] = max(
+                        0.0, 1.0 - (float(jr) / float(mjr))
+                    )
                 elif row.get("joint_reward_regret") is not None:
-                    row["joint_reward_regret_normalized"] = float(row["joint_reward_regret"]) / float(mjr)
+                    row["joint_reward_regret_normalized"] = float(
+                        row["joint_reward_regret"]
+                    ) / float(mjr)
             except Exception:
                 pass
 
@@ -282,7 +297,9 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
                 n_agents = row.get("actual_num_agents") or row.get("num_agents")
                 adv = row.get("actual_adversary_count") or row.get("adversary_count")
                 if mjr is not None and n_agents and adv is not None:
-                    row["coalition_max_reward_sum"] = (float(mjr) / float(int(n_agents))) * float(int(adv))
+                    row["coalition_max_reward_sum"] = (
+                        float(mjr) / float(int(n_agents))
+                    ) * float(int(adv))
             except Exception:
                 pass
 
@@ -305,9 +322,13 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
         if cmax not in (None, 0, 0.0):
             try:
                 if csum is not None:
-                    row["coalition_reward_regret_normalized"] = max(0.0, 1.0 - (float(csum) / float(cmax)))
+                    row["coalition_reward_regret_normalized"] = max(
+                        0.0, 1.0 - (float(csum) / float(cmax))
+                    )
                 elif row.get("coalition_reward_regret") is not None:
-                    row["coalition_reward_regret_normalized"] = float(row["coalition_reward_regret"]) / float(cmax)
+                    row["coalition_reward_regret_normalized"] = float(
+                        row["coalition_reward_regret"]
+                    ) / float(cmax)
             except Exception:
                 pass
 
@@ -326,10 +347,11 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
                     "requested_num_agents": inferred.get("requested_num_agents"),
                     "actual_num_agents": inferred.get("actual_num_agents"),
                     "adversary_count": inferred.get("adversary_count"),
-                    "requested_adversary_count": inferred.get("requested_adversary_count"),
+                    "requested_adversary_count": inferred.get(
+                        "requested_adversary_count"
+                    ),
                     "actual_adversary_count": inferred.get("actual_adversary_count"),
                     "target_role": inferred.get("target_role"),
-                    "strategy": inferred.get("strategy"),
                     "seed": inferred.get("seed"),
                 }
                 arow.update(a)

@@ -126,7 +126,9 @@ def _plot_metric_by_x(
 
     if numeric_x:
         by_x = groupby(run_rows, (x_key,))
-        x_vals = sorted([x for x in by_x.keys() if x[0] is not None], key=lambda t: float(t[0]))
+        x_vals = sorted(
+            [x for x in by_x.keys() if x[0] is not None], key=lambda t: float(t[0])
+        )
         for x_t in x_vals:
             x = x_t[0]
             rows = by_x.get((x,), [])
@@ -148,7 +150,8 @@ def _plot_metric_by_x(
         if baseline_rows:
             by_x_base = groupby(baseline_rows, (x_key,))
             x_vals_base = sorted(
-                [x for x in by_x_base.keys() if x[0] is not None], key=lambda t: float(t[0])
+                [x for x in by_x_base.keys() if x[0] is not None],
+                key=lambda t: float(t[0]),
             )
             for x_t in x_vals_base:
                 x = x_t[0]
@@ -167,7 +170,9 @@ def _plot_metric_by_x(
                     capsize=3,
                     zorder=6,
                 )
-            ax.scatter([], [], s=28, color=baseline_color, label=baseline_label, marker="s")
+            ax.scatter(
+                [], [], s=28, color=baseline_color, label=baseline_label, marker="s"
+            )
             ax.scatter([], [], s=28, color=main_color, label="Main sweep", marker="o")
             ax.legend(loc="best")
 
@@ -227,7 +232,9 @@ def _plot_metric_by_x(
                     capsize=3,
                     zorder=6,
                 )
-            ax.scatter([], [], s=28, color=baseline_color, label=baseline_label, marker="s")
+            ax.scatter(
+                [], [], s=28, color=baseline_color, label=baseline_label, marker="s"
+            )
             ax.scatter([], [], s=28, color=main_color, label="Main sweep", marker="o")
             ax.legend(loc="best")
 
@@ -277,12 +284,13 @@ def _plot_metric_by_x(
                     "plot_x_label": x_label,
                     "plot_y_label": y_label,
                     "baseline_label": baseline_label if group == "baseline" else "",
-                    "baseline_expanded": bool(baseline_expanded) if group == "baseline" else False,
+                    "baseline_expanded": bool(baseline_expanded)
+                    if group == "baseline"
+                    else False,
                     x_key: x,
                     y_key: y,
                     "run_id": r.get("run_id"),
                     "seed": r.get("seed"),
-                    "strategy": r.get("strategy"),
                     "target_role": r.get("target_role"),
                     "adversary_count": r.get("adversary_count"),
                     "num_agents": r.get("num_agents"),
@@ -584,7 +592,10 @@ def plot_sweep_metrics(
                 ac = 0
             if ac == 0 and rr.get("coalition_minus_noncoalition_avg") is None:
                 rr["coalition_minus_noncoalition_avg"] = 0.0
-            if ac == 0 and rr.get("coalition_minus_noncoalition_avg_hospital_adjusted") is None:
+            if (
+                ac == 0
+                and rr.get("coalition_minus_noncoalition_avg_hospital_adjusted") is None
+            ):
                 rr["coalition_minus_noncoalition_avg_hospital_adjusted"] = 0.0
             patched.append(rr)
         baseline_run_rows_coalition_adv = patched

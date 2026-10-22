@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
 
@@ -42,33 +42,6 @@ _ADV_ROLE_COLORS: Dict[str, str] = {
     "departmental": "#4c78a8",
     "Resource_Provisioner": "#e45756",
 }
-
-
-def _strategy_type(value: Any) -> str:
-    """
-    Match the 4 strategy buckets used in plot_overview.py.
-    """
-    s = (str(value) if value is not None else "").strip()
-    if not s or s == "none":
-        return "benign"
-    if s == "covert_max_coalition_reward":
-        return "covert"
-    if s == "destructive_max_coalition_reward":
-        return "destructive_max"
-    if s == "destructive_no_reward_preservation":
-        return "destructive_no_preservation"
-    # Unknown / legacy strings fall back to raw (still plotted if present).
-    return s
-
-
-def _strategy_label(stype: str) -> str:
-    m = {
-        "benign": "Benign",
-        "covert": "Covert",
-        "destructive_max": "Des (MCR)",
-        "destructive_no_preservation": "Des (NRP)",
-    }
-    return m.get(str(stype), str(stype).replace("_", " "))
 
 
 def _parse_seeds_spec(spec: Optional[str]) -> Optional[set[int]]:
@@ -142,7 +115,6 @@ def _plot_models_by_role_faceted(
     rows: List[Dict[str, Any]],
     metric_label: str,
     out_path: Path,
-    strategy_order: Sequence[str],
     model_order: Sequence[str],
     role_order: Sequence[str],
 ) -> None:
@@ -161,19 +133,7 @@ def _plot_models_by_role_faceted(
         }
     )
 
-    nrows = max(1, len(strategy_order))
-    fig_h = 3.2 * float(nrows)
-    fig, axes = plt.subplots(
-        nrows=nrows,
-        ncols=1,
-        figsize=(12.5, fig_h),
-        sharex=True,
-        sharey=True,
-    )
-    if hasattr(axes, "ravel"):
-        axes = list(axes.ravel())
-    else:
-        axes = [axes]
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(12.5, 3.2))
 
     group_count = len(model_order)
     hue_count = max(1, len(role_order))
@@ -182,63 +142,50 @@ def _plot_models_by_role_faceted(
     x_step = 1.25
     xs = [float(i) * x_step for i in range(group_count)]
 
-    # Summaries per (strategy_type, model_label, target_role).
-    summaries: Dict[tuple[str, str, str], tuple[float, float]] = {}
+    # Means + SEMs per (model_label, target_role).
+    buckets: Dict[tuple[str, str], List[float]] = {}
     for r in rows:
-        st = str(r.get("strategy_type"))
         ml = str(r.get("model_label"))
         rr = str(r.get("target_role"))
         v = as_float(r.get("value"))
         if v is None or not math.isfinite(float(v)):
             continue
-        summaries.setdefault((st, ml, rr), ([], []))  # type: ignore[assignment]
+        buckets.setdefault((ml, rr), []).append(float(v))
 
-    # Rebuild with lists to compute sem robustly.
-    buckets: Dict[tuple[str, str, str], List[float]] = {}
-    for r in rows:
-        st = str(r.get("strategy_type"))
-        ml = str(r.get("model_label"))
-        rr = str(r.get("target_role"))
-        v = as_float(r.get("value"))
-        if v is None or not math.isfinite(float(v)):
-            continue
-        buckets.setdefault((st, ml, rr), []).append(float(v))
-
+    summaries: Dict[tuple[str, str], tuple[float, float]] = {}
     for k, vals in buckets.items():
         summaries[k] = (float(mean(vals)), float(sem(vals)))
 
-    for ax, stype in zip(axes, strategy_order):
-        ax.grid(False)
-        for j, role in enumerate(role_order):
-            offsets = [(j - (hue_count - 1) / 2.0) * bar_width for _ in xs]
-            heights: List[float] = []
-            yerrs: List[float] = []
-            for model_label in model_order:
-                key = (str(stype), str(model_label), str(role))
-                if key not in summaries:
-                    heights.append(float("nan"))
-                    yerrs.append(0.0)
-                    continue
-                m, e = summaries[key]
-                heights.append(float(m))
-                yerrs.append(float(e))
-            if not any(math.isfinite(float(h)) for h in heights):
+    ax.grid(False)
+    for j, role in enumerate(role_order):
+        offsets = [(j - (hue_count - 1) / 2.0) * bar_width for _ in xs]
+        heights: List[float] = []
+        yerrs: List[float] = []
+        for model_label in model_order:
+            key = (str(model_label), str(role))
+            if key not in summaries:
+                heights.append(float("nan"))
+                yerrs.append(0.0)
                 continue
-            x_pos = [float(x) + float(off) for x, off in zip(xs, offsets)]
-            ax.bar(
-                x_pos,
-                heights,
-                yerr=yerrs,
-                capsize=3,
-                width=bar_width * 0.92,
-                alpha=0.9,
-                color=_ADV_ROLE_COLORS.get(str(role), None),
-                label=_role_label(str(role)),
-            )
-        ax.set_title(_strategy_label(str(stype)))
+            m, e = summaries[key]
+            heights.append(float(m))
+            yerrs.append(float(e))
+        if not any(math.isfinite(float(h)) for h in heights):
+            continue
+        x_pos = [float(x) + float(off) for x, off in zip(xs, offsets)]
+        ax.bar(
+            x_pos,
+            heights,
+            yerr=yerrs,
+            capsize=3,
+            width=bar_width * 0.92,
+            alpha=0.9,
+            color=_ADV_ROLE_COLORS.get(str(role), None),
+            label=_role_label(str(role)),
+        )
 
-    axes[-1].set_xticks(xs)
-    axes[-1].set_xticklabels(list(model_order), rotation=0, ha="center")
+    ax.set_xticks(xs)
+    ax.set_xticklabels(list(model_order), rotation=0, ha="center")
     fig.supylabel(metric_label)
 
     handles: List[Patch] = []
@@ -269,7 +216,11 @@ def _plot_models_by_role_faceted(
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
         legend_bbox = legend.get_window_extent(renderer=renderer)
-        gap_px = max((float(plt.rcParams.get("xtick.labelsize", 26)) * 2.0 / 72.0) * float(fig.dpi), 6.0)
+        gap_px = max(
+            (float(plt.rcParams.get("xtick.labelsize", 26)) * 2.0 / 72.0)
+            * float(fig.dpi),
+            6.0,
+        )
         required_bottom_frac = float(legend_bbox.y1 + gap_px) / float(fig.bbox.height)
         required_bottom_frac = min(max(required_bottom_frac, 0.0), 0.45)
         fig.subplots_adjust(bottom=required_bottom_frac)
@@ -287,7 +238,6 @@ def _plot_grouped_bars(
     metric_key: str,
     metric_label: str,
     out_path: Path,
-    strategy_order: Sequence[str],
     model_order: Sequence[str],
     legend_mode: str,
     ylabel_fontsize: Optional[float] = None,
@@ -298,70 +248,47 @@ def _plot_grouped_bars(
     fig, ax = plt.subplots(figsize=(9.6, 4.2))
     ax.grid(False)
 
-    # Compute means+SEMs per (strategy_type, model_label).
-    by_s = _groupby(rows, "strategy_type")
-    summaries: Dict[tuple[str, str], tuple[float, float]] = {}
-    for stype, bucket_rows in by_s.items():
-        st = str(stype)
-        by_m = _groupby(bucket_rows, "model_label")
-        for mlabel, mrows in by_m.items():
-            ml = str(mlabel)
-            vals = finite([as_float(r.get("value")) for r in mrows])
-            if not vals:
-                continue
-            summaries[(st, ml)] = (float(mean(vals)), float(sem(vals)))
+    # Compute means+SEMs per model_label.
+    by_m = _groupby(rows, "model_label")
+    summaries: Dict[str, tuple[float, float]] = {}
+    for mlabel, mrows in by_m.items():
+        ml = str(mlabel)
+        vals = finite([as_float(r.get("value")) for r in mrows])
+        if not vals:
+            continue
+        summaries[ml] = (float(mean(vals)), float(sem(vals)))
     colors = dict(_MODEL_COLORS)
 
-    group_count = len(strategy_order)
-    hue_count = max(1, len(model_order))
-    group_width = 0.80
-    bar_width = group_width / float(hue_count)
-
-    xs = list(range(group_count))
-    for j, model_label in enumerate(model_order):
-        offsets = [(j - (hue_count - 1) / 2.0) * bar_width for _ in xs]
-        heights: List[float] = []
-        yerrs: List[float] = []
-        for i, stype in enumerate(strategy_order):
-            key = (str(stype), str(model_label))
-            if key not in summaries:
-                heights.append(float("nan"))
-                yerrs.append(0.0)
-                continue
-            m, e = summaries[key]
-            heights.append(float(m))
-            yerrs.append(float(e))
-
-        # Skip plotting if no finite heights.
-        if not any(math.isfinite(float(h)) for h in heights):
+    xs = list(range(len(model_order)))
+    heights: List[float] = []
+    yerrs: List[float] = []
+    for model_label in model_order:
+        if str(model_label) not in summaries:
+            heights.append(float("nan"))
+            yerrs.append(0.0)
             continue
+        m, e = summaries[str(model_label)]
+        heights.append(float(m))
+        yerrs.append(float(e))
 
-        x_pos = [float(x) + float(off) for x, off in zip(xs, offsets)]
+    # Skip plotting if no finite heights.
+    if any(math.isfinite(float(h)) for h in heights):
         ax.bar(
-            x_pos,
+            xs,
             heights,
             yerr=yerrs,
             capsize=3,
-            width=bar_width * 0.92,
+            width=0.80 * 0.92,
             alpha=0.9,
-            color=colors.get(str(model_label), None),
-            label=str(model_label),
+            color=[colors.get(str(m), "#999999") for m in model_order],
         )
 
     ax.set_xticks(xs)
-    ax.set_xticklabels([_strategy_label(s) for s in strategy_order], rotation=0, ha="center")
+    ax.set_xticklabels([str(m) for m in model_order], rotation=0, ha="center")
     ax.set_ylabel(metric_label, fontsize=ylabel_fontsize, labelpad=ylabel_pad)
-    if str(legend_mode) == "in-plot":
-        ax.legend(loc="best", frameon=False, title=None)
-    elif str(legend_mode) == "outside":
-        ncol = max(1, len(model_order))
-        ax.legend(
-            loc="lower center",
-            bbox_to_anchor=(0.5, 1.02),
-            ncol=ncol,
-            frameon=False,
-            title=None,
-        )
+    # Models sit on the x-axis, so a model legend inside these axes would only
+    # duplicate the tick labels; --legend-mode "separate" still writes the
+    # standalone model legend file.
 
     fig.tight_layout()
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
@@ -380,7 +307,13 @@ def _plot_model_legend_row(*, out_path: Path, model_order: Sequence[str]) -> Non
     ensure_dir(out_path.parent)
     handles: List[Patch] = []
     for m in model_order:
-        handles.append(Patch(facecolor=_MODEL_COLORS.get(str(m), "#999999"), edgecolor="none", label=str(m)))
+        handles.append(
+            Patch(
+                facecolor=_MODEL_COLORS.get(str(m), "#999999"),
+                edgecolor="none",
+                label=str(m),
+            )
+        )
     ncol = max(1, len(handles))
     fig = plt.figure(figsize=(9.6, 0.9))
     fig.legend(handles=handles, loc="center", ncol=ncol, frameon=False)
@@ -392,14 +325,12 @@ def _emit_artifacts(
     *,
     out_path: Path,
     rows: List[Dict[str, Any]],
-    strategy_order: Sequence[str],
     legend_mode: str,
 ) -> None:
     csv_path = out_path.with_suffix(".csv")
     script_path = out_path.with_name(out_path.stem + "__replot.py")
     write_csv(csv_path, rows)
 
-    order_literal = "[" + ", ".join(repr(str(s)) for s in strategy_order) + "]"
     script = f"""\
 from __future__ import annotations
 
@@ -411,7 +342,6 @@ from typing import Any, Dict, List, Optional
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
 
 
 def _as_float(x: Any) -> Optional[float]:
@@ -449,7 +379,6 @@ def _sem(xs: List[float]) -> float:
 def main() -> None:
     here = Path(__file__).resolve().parent
     csv_path = here / {csv_path.name!r}
-    legend_mode = {str(legend_mode)!r}
 
     rows: List[Dict[str, Any]] = []
     with csv_path.open("r", encoding="utf-8", newline="") as f:
@@ -459,14 +388,7 @@ def main() -> None:
         raise SystemExit("No rows")
 
     metric_label = str(rows[0].get("plot_metric_label") or "Metric")
-    # Stable order (matches generator configuration for this plot)
-    strategy_order = {order_literal}
-    label_map = {{
-        "benign": "Benign",
-        "covert": "Covert",
-        "destructive_max": "Des (MCR)",
-        "destructive_no_preservation": "Des (NRP)",
-    }}
+    # Stable order: first-seen model order in the CSV.
     model_order = []
     for r in rows:
         m = str(r.get("model_label") or "")
@@ -492,58 +414,38 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(9.6, 4.2))
     ax.grid(False)
 
-    group_count = len(strategy_order)
-    hue_count = max(1, len(model_order))
-    group_width = 0.80
-    bar_width = group_width / float(hue_count)
-    xs = list(range(group_count))
-
-    for j, model_label in enumerate(model_order):
-        offsets = [(j - (hue_count - 1) / 2.0) * bar_width for _ in xs]
-        heights: List[float] = []
-        yerrs: List[float] = []
-        for stype in strategy_order:
-            vals = _finite(
-                [
-                    r.get("value")
-                    for r in rows
-                    if str(r.get("strategy_type")) == stype and str(r.get("model_label")) == str(model_label)
-                ]
-            )
-            if not vals:
-                heights.append(float("nan"))
-                yerrs.append(0.0)
-                continue
-            heights.append(float(_mean(vals) or 0.0))
-            yerrs.append(float(_sem(vals)))
-        if not any(math.isfinite(float(h)) for h in heights):
+    xs = list(range(len(model_order)))
+    heights: List[float] = []
+    yerrs: List[float] = []
+    for model_label in model_order:
+        vals = _finite(
+            [
+                r.get("value")
+                for r in rows
+                if str(r.get("model_label")) == str(model_label)
+            ]
+        )
+        if not vals:
+            heights.append(float("nan"))
+            yerrs.append(0.0)
             continue
-        x_pos = [float(x) + float(off) for x, off in zip(xs, offsets)]
+        heights.append(float(_mean(vals) or 0.0))
+        yerrs.append(float(_sem(vals)))
+
+    if any(math.isfinite(float(h)) for h in heights):
         ax.bar(
-            x_pos,
+            xs,
             heights,
             yerr=yerrs,
             capsize=3,
-            width=bar_width * 0.92,
+            width=0.80 * 0.92,
             alpha=0.9,
-            color=colors.get(str(model_label), None),
-            label=str(model_label),
+            color=[colors.get(str(m), "#999999") for m in model_order],
         )
 
     ax.set_xticks(xs)
-    ax.set_xticklabels([label_map.get(s, s.replace("_", " ")) for s in strategy_order], rotation=0, ha="center")
+    ax.set_xticklabels([str(m) for m in model_order], rotation=0, ha="center")
     ax.set_ylabel(metric_label)
-    if str(legend_mode) == "in-plot":
-        ax.legend(loc="best", frameon=False, title=None)
-    elif str(legend_mode) == "outside":
-        ncol = max(1, len(model_order))
-        ax.legend(
-            loc="lower center",
-            bbox_to_anchor=(0.5, 1.02),
-            ncol=ncol,
-            frameon=False,
-            title=None,
-        )
 
     fig.tight_layout()
     out_pdf = here / {out_path.name!r}
@@ -564,7 +466,9 @@ def _emit_legend_artifacts(*, out_dir: Path, model_order: Sequence[str]) -> None
 
     rows: List[Dict[str, Any]] = []
     for m in model_order:
-        rows.append({"model_label": str(m), "color": _MODEL_COLORS.get(str(m), "#999999")})
+        rows.append(
+            {"model_label": str(m), "color": _MODEL_COLORS.get(str(m), "#999999")}
+        )
     write_csv(csv_path, rows)
 
     script = f"""\
@@ -664,7 +568,11 @@ def _collect_model_rows(
         if not benign_rows:
             try:
                 roles_present = sorted(
-                    {str(r.get("target_role")) for r in benign_tables.run_rows if r.get("target_role") is not None}
+                    {
+                        str(r.get("target_role"))
+                        for r in benign_tables.run_rows
+                        if r.get("target_role") is not None
+                    }
                 )
             except Exception:
                 roles_present = []
@@ -692,8 +600,6 @@ def _collect_model_rows(
                 "plot_metric_label": plot_metric_label,
                 "model_label": model_label,
                 "model_runs_dir": str(model_runs_dir),
-                "strategy": r.get("strategy"),
-                "strategy_type": _strategy_type(r.get("strategy")),
                 "adversary_count": adversary_count,
                 "num_agents": num_agents,
                 "target_role": target_role,
@@ -714,8 +620,6 @@ def _collect_model_rows(
                 "plot_metric_label": plot_metric_label,
                 "model_label": model_label,
                 "model_runs_dir": str(model_runs_dir),
-                "strategy": r.get("strategy"),
-                "strategy_type": "benign",
                 "adversary_count": 0,
                 "num_agents": num_agents,
                 "target_role": target_role,
@@ -741,7 +645,11 @@ def _relabel_benign_rows_to_target_role(
         return []
     try:
         roles_present = sorted(
-            {str(r.get("target_role")) for r in benign_run_rows if r.get("target_role") is not None}
+            {
+                str(r.get("target_role"))
+                for r in benign_run_rows
+                if r.get("target_role") is not None
+            }
         )
     except Exception:
         roles_present = []
@@ -845,7 +753,11 @@ def _collect_advrole_minmax_rows(
                     # If benign only exists for one role, relabel to match.
                     try:
                         roles_present = sorted(
-                            {str(r.get("target_role")) for r in benign_run_rows if r.get("target_role") is not None}
+                            {
+                                str(r.get("target_role"))
+                                for r in benign_run_rows
+                                if r.get("target_role") is not None
+                            }
                         )
                     except Exception:
                         roles_present = []
@@ -859,7 +771,9 @@ def _collect_advrole_minmax_rows(
                             seeds=seeds,
                         )
                         if fallback:
-                            filtered_benign = [dict(r, target_role=str(role)) for r in fallback]
+                            filtered_benign = [
+                                dict(r, target_role=str(role)) for r in fallback
+                            ]
 
             benign_rows_by_model_role[(str(model_label), str(role))] = filtered_benign
 
@@ -879,7 +793,9 @@ def _collect_advrole_minmax_rows(
                     if cmax is not None and math.isfinite(float(cmax)):
                         coalition_max_sums.append(float(cmax))
                 else:
-                    av = as_float(r.get("coalition_minus_noncoalition_hospital_avg_actual"))
+                    av = as_float(
+                        r.get("coalition_minus_noncoalition_hospital_avg_actual")
+                    )
                     if av is not None and math.isfinite(float(av)):
                         adv_values.append(float(av))
 
@@ -893,13 +809,15 @@ def _collect_advrole_minmax_rows(
         min_val = float(min(empirical_min, 0.0))
         denom = float(mjr_max - min_val)
         if not (math.isfinite(denom) and denom > 0.0):
-            raise SystemExit(f"Invalid overall-regret denom (min={min_val}, max={mjr_max}).")
+            raise SystemExit(
+                f"Invalid overall-regret denom (min={min_val}, max={mjr_max})."
+            )
 
         for model_label in model_labels:
             for role in target_roles:
-                rows = main_rows_by_model_role.get((str(model_label), str(role)), []) + benign_rows_by_model_role.get(
+                rows = main_rows_by_model_role.get(
                     (str(model_label), str(role)), []
-                )
+                ) + benign_rows_by_model_role.get((str(model_label), str(role)), [])
                 for r in rows:
                     jr = as_float(r.get("joint_reward"))
                     if jr is None or not math.isfinite(float(jr)):
@@ -909,7 +827,6 @@ def _collect_advrole_minmax_rows(
                         {
                             "model_label": str(model_label),
                             "target_role": str(role),
-                            "strategy_type": _strategy_type(r.get("strategy")) if r.get("strategy") is not None else "benign",
                             "seed": r.get("seed"),
                             "run_id": r.get("run_id"),
                             "value": float(regret) / denom,
@@ -919,13 +836,19 @@ def _collect_advrole_minmax_rows(
 
     if metric == "coalition_regret_minmax":
         if not coalition_max_sums:
-            raise SystemExit("No coalition_max_reward_sum values found for normalization.")
+            raise SystemExit(
+                "No coalition_max_reward_sum values found for normalization."
+            )
         cmax_val = float(max(coalition_max_sums))
-        empirical_min = float(min(coalition_reward_sums)) if coalition_reward_sums else 0.0
+        empirical_min = (
+            float(min(coalition_reward_sums)) if coalition_reward_sums else 0.0
+        )
         cmin_val = float(min(empirical_min, 0.0))
         denom = float(cmax_val - cmin_val)
         if not (math.isfinite(denom) and denom > 0.0):
-            raise SystemExit(f"Invalid coalition-regret denom (cmin={cmin_val}, cmax={cmax_val}).")
+            raise SystemExit(
+                f"Invalid coalition-regret denom (cmin={cmin_val}, cmax={cmax_val})."
+            )
 
         for model_label in model_labels:
             for role in target_roles:
@@ -938,7 +861,6 @@ def _collect_advrole_minmax_rows(
                         {
                             "model_label": str(model_label),
                             "target_role": str(role),
-                            "strategy_type": _strategy_type(r.get("strategy")),
                             "seed": r.get("seed"),
                             "run_id": r.get("run_id"),
                             "value": float(reg) / denom,
@@ -967,7 +889,6 @@ def _collect_advrole_minmax_rows(
                     {
                         "model_label": str(model_label),
                         "target_role": str(role),
-                        "strategy_type": _strategy_type(r.get("strategy")),
                         "seed": r.get("seed"),
                         "run_id": r.get("run_id"),
                         "value": (float(av) - float(min_val)) / denom,
@@ -1013,7 +934,6 @@ def _collect_advrole_raw_rows(
                         "plot_metric_label": metric_label,
                         "model_label": str(model_label),
                         "target_role": str(role),
-                        "strategy_type": _strategy_type(r.get("strategy")),
                         "seed": r.get("seed"),
                         "run_id": r.get("run_id"),
                         "value": float(v),
@@ -1061,7 +981,6 @@ def _collect_role_context_rows(
         for r in main:
             rr = dict(r)
             rr["model_label"] = str(mlabel)
-            rr["strategy_type"] = _strategy_type(rr.get("strategy"))
             rr["group"] = "main"
             out.append(rr)
 
@@ -1083,7 +1002,11 @@ def _collect_role_context_rows(
             # If benign only exists for one role, relabel to the requested target_role.
             try:
                 roles_present = sorted(
-                    {str(r.get("target_role")) for r in benign_tables.run_rows if r.get("target_role") is not None}
+                    {
+                        str(r.get("target_role"))
+                        for r in benign_tables.run_rows
+                        if r.get("target_role") is not None
+                    }
                 )
             except Exception:
                 roles_present = []
@@ -1101,7 +1024,6 @@ def _collect_role_context_rows(
         for r in benign_rows:
             rr = dict(r)
             rr["model_label"] = str(mlabel)
-            rr["strategy_type"] = "benign"
             rr["group"] = "benign"
             out.append(rr)
 
@@ -1115,7 +1037,7 @@ def _build_normalized_rows_for_plot(
     metric_label: str,
 ) -> List[Dict[str, Any]]:
     """
-    Build per-run plot rows (strategy_type, model_label, value) for a normalized metric.
+    Build per-run plot rows (model_label, value) for a normalized metric.
 
     metric:
       - overall_regret_minmax: regret / (max_joint_reward - min(min_joint_reward,0))
@@ -1146,7 +1068,6 @@ def _build_normalized_rows_for_plot(
                     "plot_metric_key": metric,
                     "plot_metric_label": metric_label,
                     "model_label": r.get("model_label"),
-                    "strategy_type": r.get("strategy_type"),
                     "adversary_count": r.get("adversary_count"),
                     "num_agents": r.get("num_agents"),
                     "target_role": r.get("target_role"),
@@ -1159,7 +1080,9 @@ def _build_normalized_rows_for_plot(
         return out
 
     if metric == "coalition_regret_minmax":
-        cmaxs = finite([as_float(r.get("coalition_max_reward_sum")) for r in context_rows])
+        cmaxs = finite(
+            [as_float(r.get("coalition_max_reward_sum")) for r in context_rows]
+        )
         csums = finite([as_float(r.get("coalition_reward_sum")) for r in context_rows])
         if not cmaxs:
             return []
@@ -1180,7 +1103,6 @@ def _build_normalized_rows_for_plot(
                     "plot_metric_key": metric,
                     "plot_metric_label": metric_label,
                     "model_label": r.get("model_label"),
-                    "strategy_type": r.get("strategy_type"),
                     "adversary_count": r.get("adversary_count"),
                     "num_agents": r.get("num_agents"),
                     "target_role": r.get("target_role"),
@@ -1194,9 +1116,13 @@ def _build_normalized_rows_for_plot(
 
     if metric == "coalition_advantage_actual_minmax":
         mjrs = finite([as_float(r.get("max_joint_reward")) for r in context_rows])
-        cmaxs = finite([as_float(r.get("coalition_max_reward_sum")) for r in context_rows])
+        cmaxs = finite(
+            [as_float(r.get("coalition_max_reward_sum")) for r in context_rows]
+        )
         csums = finite([as_float(r.get("coalition_reward_sum")) for r in context_rows])
-        nsums = finite([as_float(r.get("noncoalition_reward_sum")) for r in context_rows])
+        nsums = finite(
+            [as_float(r.get("noncoalition_reward_sum")) for r in context_rows]
+        )
         if not mjrs or not cmaxs:
             return []
 
@@ -1209,11 +1135,25 @@ def _build_normalized_rows_for_plot(
 
         # Non-coalition normalization uses the non-coalition optimum sum (remainder share).
         max_joint_reward = float(max(mjrs))
-        n_agents = as_int(context_rows[0].get("actual_num_agents") or context_rows[0].get("num_agents")) or 0
-        adv = as_int(context_rows[0].get("actual_adversary_count") or context_rows[0].get("adversary_count")) or 0
+        n_agents = (
+            as_int(
+                context_rows[0].get("actual_num_agents")
+                or context_rows[0].get("num_agents")
+            )
+            or 0
+        )
+        adv = (
+            as_int(
+                context_rows[0].get("actual_adversary_count")
+                or context_rows[0].get("adversary_count")
+            )
+            or 0
+        )
         if n_agents <= 0 or adv < 0 or adv > n_agents:
             return []
-        noncoal_max_sum = (float(max_joint_reward) / float(n_agents)) * float(n_agents - adv)
+        noncoal_max_sum = (float(max_joint_reward) / float(n_agents)) * float(
+            n_agents - adv
+        )
         noncoal_min_sum = float(min(min(nsums), 0.0)) if nsums else 0.0
         noncoal_denom = float(noncoal_max_sum - noncoal_min_sum)
         if not (math.isfinite(noncoal_denom) and noncoal_denom > 0.0):
@@ -1246,7 +1186,9 @@ def _build_normalized_rows_for_plot(
             if n_agents_r <= 0 or adv_r < 0 or adv_r > n_agents_r:
                 continue
 
-            noncoal_max_sum_r = (float(mjr) / float(n_agents_r)) * float(n_agents_r - adv_r)
+            noncoal_max_sum_r = (float(mjr) / float(n_agents_r)) * float(
+                n_agents_r - adv_r
+            )
             if not (math.isfinite(noncoal_max_sum_r) and noncoal_max_sum_r > 0.0):
                 continue
 
@@ -1260,7 +1202,6 @@ def _build_normalized_rows_for_plot(
                     "plot_metric_key": metric,
                     "plot_metric_label": metric_label,
                     "model_label": r.get("model_label"),
-                    "strategy_type": r.get("strategy_type"),
                     "adversary_count": r.get("adversary_count"),
                     "num_agents": r.get("num_agents"),
                     "target_role": r.get("target_role"),
@@ -1277,7 +1218,7 @@ def _build_normalized_rows_for_plot(
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Grouped barplots across models (strategy type on x, model as hue)."
+        description="Barplots across models (model on x, one bar per model)."
     )
     parser.add_argument(
         "--model-runs-dir",
@@ -1363,7 +1304,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     seeds = _parse_seeds_spec(args.seeds)
 
-    strategy_order = ["benign", "covert", "destructive_max", "destructive_no_preservation"]
     model_order = list(model_labels)
 
     specs = [
@@ -1416,15 +1356,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                     )
                 )
 
-            # For coalition-only metrics, drop benign rows (no coalition exists).
+            # For coalition-only metrics, drop the benign baseline rows (no coalition exists).
             if not bool(include_benign):
-                rows = [r for r in rows if str(r.get("strategy_type")) != "benign"]
+                rows = [r for r in rows if as_int(r.get("adversary_count")) != 0]
 
-            # Plot expects per-run points with (strategy_type, model_label, value).
+            # Plot expects per-run points with (model_label, value).
             out_path = role_dir / sanitize_filename(str(filename))
-            metric_strategy_order = (
-                strategy_order if bool(include_benign) else [s for s in strategy_order if s != "benign"]
-            )
             _plot_grouped_bars(
                 rows=rows,
                 metric_key=str(metric_key),
@@ -1434,7 +1371,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                     else str(metric_label)
                 ),
                 out_path=out_path,
-                strategy_order=metric_strategy_order,
                 model_order=model_order,
                 legend_mode=str(args.legend_mode),
                 ylabel_fontsize=(
@@ -1451,7 +1387,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             _emit_artifacts(
                 out_path=out_path,
                 rows=rows,
-                strategy_order=metric_strategy_order,
                 legend_mode=str(args.legend_mode),
             )
 
@@ -1485,14 +1420,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 metric_key="overall_regret_minmax",
                 metric_label="Overall Regret",
                 out_path=out_path,
-                strategy_order=["benign", "covert", "destructive_max", "destructive_no_preservation"],
                 model_order=model_order,
                 legend_mode=str(args.legend_mode),
             )
             _emit_artifacts(
                 out_path=out_path,
                 rows=rows_overall_norm,
-                strategy_order=["benign", "covert", "destructive_max", "destructive_no_preservation"],
                 legend_mode=str(args.legend_mode),
             )
 
@@ -1520,14 +1453,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 metric_key="coalition_regret_minmax",
                 metric_label="Coalition Regret",
                 out_path=out_path,
-                strategy_order=["covert", "destructive_max", "destructive_no_preservation"],
                 model_order=model_order,
                 legend_mode=str(args.legend_mode),
             )
             _emit_artifacts(
                 out_path=out_path,
                 rows=rows_coal_norm,
-                strategy_order=["covert", "destructive_max", "destructive_no_preservation"],
                 legend_mode=str(args.legend_mode),
             )
 
@@ -1538,13 +1469,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             metric_label="Coalition Advantage",
         )
         if rows_adv_norm:
-            out_path = _normalized_out_path(role_dir / "coalition_advantage_actual_by_model.pdf")
+            out_path = _normalized_out_path(
+                role_dir / "coalition_advantage_actual_by_model.pdf"
+            )
             _plot_grouped_bars(
                 rows=rows_adv_norm,
                 metric_key="coalition_advantage_actual_minmax",
                 metric_label="Coalition Adv",
                 out_path=out_path,
-                strategy_order=["covert", "destructive_max", "destructive_no_preservation"],
                 model_order=model_order,
                 legend_mode=str(args.legend_mode),
                 ylabel_fontsize=None,
@@ -1553,7 +1485,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             _emit_artifacts(
                 out_path=out_path,
                 rows=rows_adv_norm,
-                strategy_order=["covert", "destructive_max", "destructive_no_preservation"],
                 legend_mode=str(args.legend_mode),
             )
 
@@ -1573,14 +1504,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             target_roles=target_roles,
             metric="overall_regret_minmax",
         )
-        present_strats = sorted({str(r.get("strategy_type")) for r in rows_regret if r.get("strategy_type")})
-        strategy_order_regret = [s for s in strategy_order if s in present_strats]
-        out_path_regret = advrole_dir / "overall_regret_minmax_normalized_by_model_and_advrole.pdf"
+        out_path_regret = (
+            advrole_dir / "overall_regret_minmax_normalized_by_model_and_advrole.pdf"
+        )
         _plot_models_by_role_faceted(
             rows=rows_regret,
             metric_label=ylabel_regret,
             out_path=out_path_regret,
-            strategy_order=strategy_order_regret,
             model_order=model_order,
             role_order=role_order,
         )

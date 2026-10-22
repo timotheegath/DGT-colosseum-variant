@@ -40,7 +40,6 @@ class RunSpec:
     num_agents: int
     num_patients: int
     adversary_count: int
-    strategy: str
     target_role: Any
     seed: int
 
@@ -50,7 +49,6 @@ class RunSpec:
             model_label=self.model_label,
             sweep_name=self.sweep_name,
             topology=self.topology,
-            strategy=self.strategy,
             num_agents=self.num_agents,
             num_patients=self.num_patients,
             adversary_count=self.adversary_count,
@@ -76,7 +74,7 @@ class RunSpec:
     def run_label(self) -> str:
         role = self.target_role if self.target_role else "Any"
         return (
-            f"{self.model_label}/{self.sweep_name}/topo{self.topology}/strat{self.strategy}"
+            f"{self.model_label}/{self.sweep_name}/topo{self.topology}"
             f"/n{self.num_agents}/p{self.num_patients}/adv{self.adversary_count}/{role}/seed{self.seed}"
         )
 
@@ -122,7 +120,6 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
             agent_counts = sweep.get("num_agents") or []
             adversary_counts = sweep.get("adversary_counts") or []
             patient_counts = sweep.get("num_patients") or []
-            strategies = sweep.get("strategies") or ["none"]
             target_roles = sweep.get("target_roles") or [None]
             seeds = run_mod._normalize_seeds(sweep.get("seeds")) or list(default_seeds)
             if runs_per_setting is not None:
@@ -137,28 +134,22 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
                     for a in adversary_counts:
                         for role in target_roles:
                             for num_patients in patient_counts:
-                                for strategy in strategies:
-                                    if int(a) == 0 and str(strategy) != "none":
-                                        continue
-                                    if int(a) > 0 and str(strategy) == "none":
-                                        continue
-                                    for seed in seeds:
-                                        yield RunSpec(
-                                            model_label=model_label,
-                                            model_llm_cfg=llm_cfg,
-                                            sweep_name=sweep_name,
-                                            topology=str(topology),
-                                            num_agents=int(n),
-                                            num_patients=int(
-                                                run_mod._resolve_num_patients_spec(
-                                                    raw=num_patients, num_agents=int(n)
-                                                )
-                                            ),
-                                            adversary_count=int(a),
-                                            strategy=str(strategy),
-                                            target_role=role,
-                                            seed=int(seed),
-                                        )
+                                for seed in seeds:
+                                    yield RunSpec(
+                                        model_label=model_label,
+                                        model_llm_cfg=llm_cfg,
+                                        sweep_name=sweep_name,
+                                        topology=str(topology),
+                                        num_agents=int(n),
+                                        num_patients=int(
+                                            run_mod._resolve_num_patients_spec(
+                                                raw=num_patients, num_agents=int(n)
+                                            )
+                                        ),
+                                        adversary_count=int(a),
+                                        target_role=role,
+                                        seed=int(seed),
+                                    )
 
 
 def _select_incomplete_runs(
@@ -262,7 +253,6 @@ async def resume_runs(
                         num_agents=spec.num_agents,
                         num_patients=spec.num_patients,
                         adversary_count=spec.adversary_count,
-                        strategy=spec.strategy,
                         target_role=spec.target_role,
                         seed=spec.seed,
                         out_dir=root,
@@ -306,7 +296,6 @@ async def resume_runs(
                         num_agents=spec.num_agents,
                         num_patients=spec.num_patients,
                         adversary_count=spec.adversary_count,
-                        strategy=spec.strategy,
                         target_role=spec.target_role,
                         seed=spec.seed,
                         out_dir=root,
