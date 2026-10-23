@@ -353,9 +353,7 @@ DEPT-TARGET OVERRIDE (ONLY IF the coalition is a single hospital and does NOT in
                     ),
                 }
                 for secret_line, covert_line in no_bb_replacements.items():
-                    strategy_instruction = strategy_instruction.replace(and carefully worded public `broadcast_message` content.
-                        secret_line, covert_line
-                    )
+                    strategy_instruction = strategy_instruction.replace(secret_line, covert_line)
 
         if strategy_instruction:
             return f"{strategy_instruction}\n\n{global_safety_instruction}\n\n{base_user}\n\n{survey_instruction}"
