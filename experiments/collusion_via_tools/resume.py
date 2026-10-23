@@ -44,6 +44,7 @@ class RunSpec:
     seed: int
     disable_post_message: bool = False
     pre_coordination_round: bool = False
+    pre_coordination_rounds: int = 1
     pre_coordination_max_messages: Optional[int] = None
 
     @property
@@ -99,6 +100,74 @@ def _is_run_complete(run_dir: Path) -> bool:
     return all((run_dir / fname).exists() for fname in REQUIRED_RUN_FILES)
 
 
+def _run_pre_coordination_treatment(
+    run_config: Dict[str, Any],
+) -> Tuple[bool, int]:
+    """Return ``(phase_enabled, effective_rounds)`` recorded in a run config.
+
+    Legacy run configs written before `simulation.pre_coordination_rounds`
+    existed have the phase flag but no count; they executed exactly one round,
+    so the missing count is read as 1. A disabled phase has 0 effective rounds.
+    """
+    phase_enabled = bool(run_config.get("pre_coordination_round", False))
+    adversaries = run_config.get("adversaries")
+    if isinstance(adversaries, list) and not adversaries:
+        # Benign run: the phase is skipped even when the flag is on.
+        phase_enabled = False
+    if not phase_enabled:
+        return False, 0
+
+    effective = run_config.get("pre_coordination_rounds_effective")
+    if effective is None:
+        configured = run_config.get("pre_coordination_rounds")
+        effective = 1 if configured is None else configured
+    try:
+        return True, int(effective)
+    except (TypeError, ValueError):
+        # Unparseable metadata cannot be verified: treat it as a mismatch so
+        # the run is rerun with the expected treatment.
+        return True, -1
+
+
+def _expected_pre_coordination_treatment(spec: "RunSpec") -> Tuple[bool, int]:
+    """Expected ``(phase_enabled, effective_rounds)`` for a resume spec.
+
+    Benign runs (no adversaries) skip the phase even when the flag is on, so
+    their effective round count is 0.
+    """
+    phase_enabled = bool(spec.pre_coordination_round and spec.adversary_count > 0)
+    if not phase_enabled:
+        return False, 0
+    return True, int(spec.pre_coordination_rounds)
+
+
+def _run_matches_spec(run_dir: Path, spec: "RunSpec") -> bool:
+    """Whether a completed run directory matches the spec's treatment.
+
+    File presence is not enough: a run produced with a different
+    pre-coordination round count must be rerun rather than accepted as
+    complete. `run_id` intentionally stays stable, so this metadata is the
+    only place the difference is observable.
+    """
+    if not _is_run_complete(run_dir):
+        return False
+    try:
+        run_config = json.loads(
+            (run_dir / "run_config.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(run_config, dict):
+        return False
+    actual_flag, actual_rounds = _run_pre_coordination_treatment(run_config)
+    expected_flag, expected_rounds = _expected_pre_coordination_treatment(spec)
+    if not expected_flag:
+        # No pre-coordination execution expected (phase off or benign): the
+        # recorded effective count is the meaningful comparison.
+        return actual_rounds == 0
+    return actual_flag and actual_rounds == expected_rounds
+
+
 def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
     exp = cfg.get("experiment") or {}
     models = cfg.get("llm_models") or []
@@ -115,6 +184,10 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
         default_seeds = run_mod._normalize_seeds(
             (cfg.get("simulation") or {}).get("seed")
         ) or [1]
+
+    # Global (non-sweep) setting. Validated here as well as in `resume_runs`
+    # so dry-runs fail before touching the output root.
+    resolved_precoord_rounds = run_mod._resolve_pre_coordination_rounds(cfg)
 
     for model in models:
         model_label = str(model.get("label") or "model")
@@ -172,6 +245,9 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
                                                 seed=int(seed),
                                                 disable_post_message=resolved_dpm,
                                                 pre_coordination_round=precoord,
+                                                pre_coordination_rounds=(
+                                                    resolved_precoord_rounds
+                                                ),
                                                 pre_coordination_max_messages=resolved_precoord_max,
                                             )
 
@@ -188,7 +264,7 @@ def _select_incomplete_runs(
             root / "runs" / spec.model_label / spec.sweep_name / run_id
             for run_id in spec.run_id_candidates
         ]
-        if any(_is_run_complete(d) for d in run_dirs):
+        if any(_run_matches_spec(d, spec) for d in run_dirs):
             completed += 1
         else:
             incomplete.append(spec)
@@ -203,6 +279,7 @@ async def resume_runs(
     stop_on_error: bool,
     dry_run: bool,
 ) -> None:
+    run_mod._resolve_pre_coordination_rounds(cfg)
     run_mod._ensure_dir(root)
     run_mod._configure_experiment_logging(root)
 

@@ -8,12 +8,13 @@ that the agent would have been sent by terrarium's
 ``BaseAgent._multi_step_response_generation``.
 
 Scope (intentional):
-    Only the FIRST turn of each phase occurrence is recorded. The runner asks
-    for the prompts that started each phase (``pre_coordination``,
-    ``planning`` round 1, ``execution``, ``survey``), not the (potentially
-    many) subsequent planning rounds. The filter is implemented in
-    :meth:`ThreadSafePromptRecorder.record_prompts` and is the single
-    authoritative rule.
+    Only the FIRST turn of a multi-round phase occurrence is recorded for
+    ``planning`` (round 1), not its subsequent planning rounds. Every
+    ``pre_coordination`` round is captured, because each round has a
+    different "round N of M" prompt and the coalition's later turns build on
+    earlier ones. ``execution`` and ``survey`` are single-turn phases. The
+    filter is implemented in :meth:`ThreadSafePromptRecorder.record_prompts`
+    and is the single authoritative rule.
 
 Output (streamed during the run, not at the end):
     Both files are created as soon as the recorder is constructed — i.e. before
@@ -49,14 +50,16 @@ from typing import Any, Dict, List, Optional
 
 
 class ThreadSafePromptRecorder:
-    """Records the first system+user prompt per (phase, iteration, round) tuple.
+    """Records the system+user prompt each agent receives per captured turn.
 
     The recorder is per-run. Multiple concurrent runs each hold their own
     instance and write to their own run directory; they never share state.
     """
 
     # Phases where ``round`` is meaningful. ``planning`` has multiple rounds
-    # per iteration; only round 1 (the first one) is the start of the phase.
+    # per iteration; only round 1 is the start of the phase. ``pre_coordination``
+    # is deliberately absent: each of its rounds is a distinct prompt (current
+    # round / total), so all rounds are captured.
     _MULTI_ROUND_PHASES = frozenset({"planning"})
 
     def __init__(
@@ -122,9 +125,10 @@ class ThreadSafePromptRecorder:
     def is_first_of_phase(cls, phase: str, round_num: Optional[int]) -> bool:
         """Return True iff this turn is the FIRST turn of its phase occurrence.
 
-        ``round_num`` is the terrarium planning round (1-indexed for planning,
-        0 for execution / survey / pre_coordination). ``None`` is treated as
-        "first".
+        ``round_num`` is the 1-indexed round number for multi-turn phases
+        (planning rounds and the pre-coordination phase); ``0`` for execution /
+        survey. ``None`` is treated as "first". Only ``planning`` is filtered
+        to round 1; every pre-coordination round is captured.
         """
         if phase in cls._MULTI_ROUND_PHASES:
             return round_num in (None, 0, 1)

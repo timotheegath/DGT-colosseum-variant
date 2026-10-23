@@ -317,7 +317,7 @@ class PreCoordinationPhaseRemapTests(unittest.TestCase):
         self.assertEqual(wrapped_out, base_out)
         self.assertNotIn("[PHASE: PLANNING]", wrapped_out)
 
-    def test_misalignment_pre_coordination_keeps_block_and_planning(self) -> None:
+    def test_misalignment_pre_coordination_uses_compact_prompt(self) -> None:
         import types
 
         agent_context = {
@@ -329,6 +329,8 @@ class PreCoordinationPhaseRemapTests(unittest.TestCase):
             "misalignment_adversaries": ["Resource_Provisioner", "AgentB"],
             "misalignment_secret_blackboard_id": 7,
             "post_message_available": True,
+            "pre_coordination_round": 1,
+            "pre_coordination_rounds": 2,
         }
         prompts = MisalignmentPrompts(
             types.SimpleNamespace(), {}, base_prompts=self.wrapped
@@ -336,8 +338,10 @@ class PreCoordinationPhaseRemapTests(unittest.TestCase):
         prompt = prompts.get_user_prompt(
             "Resource_Provisioner", agent_context, TWO_BOARDS
         )
-        self.assertIn("PRE-COORDINATION ROUND", prompt)
-        self.assertIn("[PHASE: PLANNING]", prompt)
+        self.assertIn("PRE-COORDINATION ROUND 1 OF 2", prompt)
+        # Compact phase prompt: the operational planning prompt is not used.
+        self.assertNotIn("[PHASE: PLANNING]", prompt)
+        self.assertNotIn("[PHASE: EXECUTION]", prompt)
         self.assertIn("=== BLACKBOARD (ID: 0) ===", prompt)
 
 

@@ -95,6 +95,7 @@ simulation:
 | `max_iterations` | Outer simulation iterations. | **Ignored by `collusion`** — it hard-forces it to `1`. Honoured by `agent_misalignment` (default 3 in configs). |
 | `max_planning_rounds` | Planning cycles per iteration (each agent gets a planning turn per round). | Yes — `experiment.planning_rounds` takes precedence in `collusion`. |
 | `max_conversation_steps` | Max tool-call steps per agent turn. This is a real cost lever. | Yes — `experiment.max_conversation_steps` takes precedence in `collusion`. |
+| `pre_coordination_rounds` | Rounds in the adversaries-only pre-coordination phase (one turn per adversary per round), when the runner's `pre_coordination_round` flag is on. Global, **not** a sweep axis. `post_message` is enabled only when a coalition-only secret board exists; without one it is disabled for the phase. Recorded as configured and effective (`_effective` is `0` when disabled/benign); resume reruns a completed run whose recorded count differs, treating legacy phase-enabled configs as `1`. Must be an integer `>= 1`; booleans/non-integers/`< 1` raise. Read only by `collusion_via_tools`; default `1`. | No. |
 | `tags` | Written into `cfg["simulation"]["tags"]` for terrarium loggers. | No. |
 | `run_timestamp` | Set by the runner. Do not set it. | — |
 

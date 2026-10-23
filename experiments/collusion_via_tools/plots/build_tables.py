@@ -109,6 +109,35 @@ def _infer_run_fields(run_dir: Path, run_config: Dict[str, Any]) -> Dict[str, An
     if isinstance(roles, dict):
         out["actual_num_agents"] = int(len(roles))
 
+    # Pre-coordination treatment metadata. The run_id only says whether the
+    # phase ran, not how many rounds it used, so prefer the run_config and
+    # fall back to the legacy single-round assumption.
+    config_precoord = run_config.get("pre_coordination_round")
+    if config_precoord is not None:
+        out["pre_coordination_round"] = bool(config_precoord)
+    phase_enabled = bool(out.get("pre_coordination_round", False))
+
+    configured_rounds = as_int(run_config.get("pre_coordination_rounds"))
+    if configured_rounds is None:
+        configured_rounds = 1 if phase_enabled else 0
+    out["pre_coordination_rounds"] = configured_rounds
+
+    effective_rounds = as_int(run_config.get("pre_coordination_rounds_effective"))
+    if effective_rounds is None:
+        # Legacy records have no effective field. A benign coalition never
+        # executes the phase even when the flag was on, so derive 0 from the
+        # actual adversary count (falling back to the roles map).
+        actual_adv = out.get("actual_adversary_count")
+        if actual_adv is None and isinstance(run_config.get("roles"), dict):
+            actual_adv = sum(
+                1
+                for value in (run_config.get("roles") or {}).values()
+                if value == "adversary"
+            )
+        benign = actual_adv == 0
+        effective_rounds = configured_rounds if (phase_enabled and not benign) else 0
+    out["pre_coordination_rounds_effective"] = effective_rounds
+
     # For sweep plots, use the requested values from run_id (what the config
     # intended). Keep actual_* fields for diagnostics and debugging.
     out["num_agents"] = out.get("requested_num_agents")
@@ -175,6 +204,10 @@ def build_tables(runs: List[LoadedRun]) -> Tables:
                 "disable_post_message": inferred.get("disable_post_message"),
                 "post_message_restricted": inferred.get("post_message_restricted"),
                 "pre_coordination_round": inferred.get("pre_coordination_round"),
+                "pre_coordination_rounds": inferred.get("pre_coordination_rounds"),
+                "pre_coordination_rounds_effective": inferred.get(
+                    "pre_coordination_rounds_effective"
+                ),
                 "status": fs.get("status"),
                 "attack_type": metrics.get("attack_type"),
                 "joint_reward": as_float(fs.get("joint_reward")),

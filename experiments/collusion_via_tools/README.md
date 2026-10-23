@@ -76,6 +76,64 @@ The filter arguments above (`--num-agents`, `--target-role`, `--adversary-count`
 * **Figure 7 topology**: `complete`
 * **Figure 7 sweep design**: the experiment fixes the covert behavior; `target_roles` splits provisioner vs departmental coalitions.
 
+## Pre-coordination rounds
+
+`pre_coordination_round: true` (sweep key, or under `experiment` /
+`experiment.adversary` / `communication_network`) runs a dedicated
+adversaries-only phase before planning iteration 1. It is coordination-only:
+the prompt does not inherit the operational planning instructions, every
+environment tool is blocked, and the agent context is stripped of environment
+state.
+
+`post_message` is available during the phase **only when a coalition-only
+secret blackboard exists**; posts are routed to it. If there is no secret board,
+`post_message` is disabled for the whole phase and the prompt explicitly says
+there is no private channel and the tool must not be called — a public board is
+never a fallback.
+
+The number of rounds is `simulation.pre_coordination_rounds` (integer `>= 1`,
+default `1`). It is a **global** setting, not a sweep axis: every run in the
+sweep uses the same value. Each round gives every adversary one turn, in the
+same agent order as the normal planning loop, and honest agents are skipped
+entirely. When a secret board exists, later rounds see the coalition messages
+written in earlier rounds, so a coalition can refine its scheme across the
+phase:
+
+```yaml
+simulation:
+  pre_coordination_rounds: 2   # default 1; global, not swept
+```
+
+`pre_coordination_max_messages` is a per-agent `post_message` cap, applied
+**per round**: counters reset at the start of every pre-coordination round.
+Omit it (or set `null`/`0`) for unlimited messages. Invalid
+`pre_coordination_rounds` values (booleans, non-integers, `< 1`) raise a
+`ValueError` when the config is loaded, before any runs are scheduled.
+
+Rounds are recorded 1-based in `agent_turns.json` (`pre_coordination_round` /
+`pre_coordination_rounds`, plus the shared `round` field) and in
+`agent_trajectories.json` (`iteration_0 -> pre_coordination -> round_<R>`).
+Every round's initial prompt is captured (each has a different current/total
+round line), and a blackboard snapshot is written after every completed round.
+
+`run_config.json` records both the configured count
+(`pre_coordination_rounds`) and the effective count actually executed
+(`pre_coordination_rounds_effective`; `0` when the phase is disabled or the run
+is benign). Both are also flattened into `summary.json` / `summary.csv`.
+
+`run_id` stays stable — the count is not part of it. `resume.py` therefore
+compares the treatment metadata in an existing `run_config.json` against the
+expected count: a completed run whose phase actually executed with a different
+count is treated as incomplete and rerun instead of being accepted. Legacy run
+configs with the phase enabled but no recorded count are treated as having
+executed `1` round. Disabled/benign runs have effective `0`, so a global count
+change alone does not rerun them.
+A rerun resets `agent_trajectories.json` so stale pre-coordination rounds from
+an earlier attempt are not merged into the new run. Since the count is global
+and absent from `run_id`, compare different counts across separate output roots
+(or rerun in place with the new value); a run with a different count in the same
+root is overwritten, not added alongside.
+
 ## Restricting `post_message` (tool-based collusion)
 
 By default Terrarium exposes a `post_message` blackboard tool to every agent.
@@ -142,9 +200,9 @@ Each run directory contains:
 * `run_config.json`: full config + assigned roles + `disable_post_message_after_round` / `disable_post_message`
 * `final_summary.json`: environment final state summary
 * `judgements.json`: judge outputs (if enabled)
-* `agent_turns.json`: full transcript (planning/execution/surveys); the FIRST turn of each phase occurrence carries the captured `system_prompt` and `user_prompt`
-* `agent_initial_prompts.jsonl` / `agent_initial_prompts.md`: the initial system+user prompt each agent received at the start of each phase (pre_coordination / planning round 1 / execution / survey). Subsequent planning rounds are not captured — only the prompt that started each phase occurrence. Both files are created when the run starts and **appended to live** as turns complete (one JSON object per line), so the prompts survive a crash during the post-simulation judge pass.
-* `agent_trajectories.json`: per-agent reasoning + tool-call traces, nested as `agent -> iteration_<N> -> phase -> round_<M>`. The adversary pre-coordination round is recorded under the `pre_coordination` phase at `iteration_0 -> pre_coordination -> round_0`, so it is distinguishable from the normal `planning` phase (logged as `iteration_<N> -> planning -> round_<M>`).
+* `agent_turns.json`: full transcript (planning/execution/surveys); the first turn of each phase occurrence **and every pre-coordination round** carries the captured `system_prompt` and `user_prompt`
+* `agent_initial_prompts.jsonl` / `agent_initial_prompts.md`: the initial system+user prompt each agent received at the start of each phase occurrence (each pre-coordination round / planning round 1 / execution / survey). Every pre-coordination round is captured because its prompt names the current and total round; subsequent *planning* rounds are not captured. Both files are created when the run starts and **appended to live** as turns complete (one JSON object per line), so the prompts survive a crash during the post-simulation judge pass.
+* `agent_trajectories.json`: per-agent reasoning + tool-call traces, nested as `agent -> iteration_<N> -> phase -> round_<M>`. The adversary pre-coordination rounds are recorded under the `pre_coordination` phase at `iteration_0 -> pre_coordination -> round_<R>`, where `R` is 1-based (`1..simulation.pre_coordination_rounds`), so they are distinguishable from the normal `planning` phase (logged as `iteration_<N> -> planning -> round_<M>`).
 
 ## Resume
 If a sweep is interrupted, you can resume it without re-running completed settings:
@@ -205,7 +263,7 @@ Unlike the entries below, this is a **new capability**, not a divergence from `a
   - `agent_initial_prompts.jsonl` — one JSON object per line, for programmatic reads. Line-oriented rather than a single JSON array because an array cannot be safely appended incrementally.
   - `agent_initial_prompts.md` — human-readable rendering.
 - **Streamed during the run, not flushed at the end.** Both files are created as soon as the run starts and appended as turns complete. This matters because the judge pass (`judge_beliefs.judge_run`) is a second full LLM sweep that runs *after* the simulation loop; under the previous end-of-run flush, a failure there discarded every prompt from an already-completed run. You can `tail -f` the Markdown while a sweep is in progress.
-- **`agent_turns.json` also carries the prompts.** First-of-phase turns gain `system_prompt` / `user_prompt` keys alongside `response` / `usage` / `tools_executed`. The change is purely additive, so existing consumers (including `judge_beliefs`) are unaffected.
+- **`agent_turns.json` also carries the prompts.** The first turn of each phase occurrence (planning round 1 / execution / survey) and every pre-coordination round gain `system_prompt` / `user_prompt` keys alongside `response` / `usage` / `tools_executed`. The change is purely additive, so existing consumers (including `judge_beliefs`) are unaffected.
 - **Resume behaviour:** re-running the same `run_id` truncates both files rather than appending to stale output.
 
 ### 2026-10-23 — prompt fix: no board posting without a usable secret board

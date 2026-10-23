@@ -29,6 +29,13 @@ def _infer(run_id: str) -> dict:
         return _infer_run_fields(run_dir, {"run_id": run_id})
 
 
+def _infer_cfg(run_id: str, run_config: dict) -> dict:
+    with tempfile.TemporaryDirectory() as tmp:
+        run_dir = Path(tmp) / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return _infer_run_fields(run_dir, {"run_id": run_id, **run_config})
+
+
 class RunIdParsingTests(unittest.TestCase):
     def assert_common_fields(self, fields: dict, *, role: str) -> None:
         self.assertEqual(fields.get("model_label"), "qwen")
@@ -114,6 +121,64 @@ class RunIdParsingTests(unittest.TestCase):
         self.assertFalse(fields.get("disable_post_message"))
         self.assertFalse(fields.get("post_message_restricted"))
         self.assertFalse(fields.get("pre_coordination_round"))
+
+
+class TreatmentMetadataTests(unittest.TestCase):
+    def test_configured_and_effective_counts_from_run_config(self) -> None:
+        rid = BASE.format(role="Patient", suffix="__precoord")
+        fields = _infer_cfg(
+            rid,
+            {
+                "pre_coordination_round": True,
+                "pre_coordination_rounds": 2,
+                "pre_coordination_rounds_effective": 2,
+            },
+        )
+        self.assertTrue(fields.get("pre_coordination_round"))
+        self.assertEqual(fields.get("pre_coordination_rounds"), 2)
+        self.assertEqual(fields.get("pre_coordination_rounds_effective"), 2)
+
+    def test_legacy_precoord_run_defaults_to_one_round(self) -> None:
+        rid = BASE.format(role="Patient", suffix="__precoord")
+        fields = _infer_cfg(rid, {"pre_coordination_round": True})
+        self.assertEqual(fields.get("pre_coordination_rounds"), 1)
+        self.assertEqual(fields.get("pre_coordination_rounds_effective"), 1)
+
+    def test_legacy_benign_precoord_effective_rounds_zero(self) -> None:
+        # Legacy benign run with the phase flag on but no effective field: the
+        # actual coalition was empty, so no pre-coordination round executed.
+        rid = BASE.format(role="Patient", suffix="__precoord")
+        fields = _infer_cfg(
+            rid,
+            {"pre_coordination_round": True, "adversaries": []},
+        )
+        self.assertEqual(fields.get("pre_coordination_rounds"), 1)
+        self.assertEqual(fields.get("pre_coordination_rounds_effective"), 0)
+
+    def test_legacy_benign_roles_fallback_effective_rounds_zero(self) -> None:
+        rid = BASE.format(role="Patient", suffix="__precoord")
+        fields = _infer_cfg(
+            rid,
+            {
+                "pre_coordination_round": True,
+                "roles": {"A": "cooperative", "B": "cooperative"},
+            },
+        )
+        self.assertEqual(fields.get("pre_coordination_rounds_effective"), 0)
+
+    def test_disabled_phase_has_zero_effective_rounds(self) -> None:
+        rid = BASE.format(role="Patient", suffix="")
+        fields = _infer_cfg(
+            rid,
+            {
+                "pre_coordination_round": False,
+                "pre_coordination_rounds": 2,
+                "pre_coordination_rounds_effective": 0,
+            },
+        )
+        self.assertFalse(fields.get("pre_coordination_round"))
+        self.assertEqual(fields.get("pre_coordination_rounds"), 2)
+        self.assertEqual(fields.get("pre_coordination_rounds_effective"), 0)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 """Prompt-capture regression tests.
 
 Pure stdlib ``unittest``: no network, no LLM calls, no environment
-construction. These exercise the recorder's "first-of-phase only" filter, the
+construction. These exercise the recorder's first-of-phase filter (planning
+round 1 / execution / survey) plus every pre-coordination round, the
 thread-safe store, the file flush, and the ``run._extract_initial_prompts``
 helper that hoists captured prompts into ``agent_turns.json`` entries.
 """
@@ -36,6 +37,19 @@ class FirstOfPhaseFilterTests(unittest.TestCase):
                 ThreadSafePromptRecorder.is_first_of_phase(phase, None), phase
             )
 
+    def test_precoordination_every_round_is_captured(self) -> None:
+        # Each pre-coordination round has a different "round N of M" prompt, so
+        # round 2 must not be dropped by the first-of-phase filter.
+        self.assertTrue(
+            ThreadSafePromptRecorder.is_first_of_phase("pre_coordination", 1)
+        )
+        self.assertTrue(
+            ThreadSafePromptRecorder.is_first_of_phase("pre_coordination", 2)
+        )
+        self.assertTrue(
+            ThreadSafePromptRecorder.is_first_of_phase("pre_coordination", 5)
+        )
+
 
 class RecordPromptsTests(unittest.TestCase):
     def test_first_of_phase_returns_payload_and_stores(self) -> None:
@@ -67,6 +81,20 @@ class RecordPromptsTests(unittest.TestCase):
         )
         self.assertIsNone(out)
         self.assertEqual(len(rec), 0)
+
+    def test_precoordination_round_two_is_stored(self) -> None:
+        rec = ThreadSafePromptRecorder()
+        out = rec.record_prompts(
+            agent_name="A",
+            phase="pre_coordination",
+            iteration=0,
+            round_num=2,
+            system_prompt="SYS-R2",
+            user_prompt="USR-R2",
+        )
+        self.assertEqual(out, {"system_prompt": "SYS-R2", "user_prompt": "USR-R2"})
+        self.assertEqual(len(rec), 1)
+        self.assertEqual(rec.entries[0]["round"], 2)
 
 
 class StreamingOutputTests(unittest.TestCase):

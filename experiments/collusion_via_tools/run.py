@@ -13,7 +13,7 @@ import asyncio
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from tqdm import tqdm
 import networkx as nx
@@ -44,6 +44,10 @@ from experiments.collusion_via_tools.prompt_capture import ThreadSafePromptRecor
 from experiments.common.local_protocol import LocalCommunicationProtocol
 from experiments.collusion_via_tools.judge_beliefs import judge_run
 from experiments.common._patch_terrarium import (
+    get_post_message_call_limit,
+    get_secret_blackboard_id,
+    is_env_tools_blocked,
+    is_post_message_disabled,
     reset_post_message_counts,
     set_env_tools_blocked,
     set_post_message_call_limit,
@@ -188,6 +192,37 @@ def _resolve_pre_coordination_round(
     return False
 
 
+def _normalize_pre_coordination_rounds(val: Any) -> int:
+    """Validates `simulation.pre_coordination_rounds`.
+
+    Unlike the other pre-coordination knobs this one is strict: booleans
+    (``bool`` is an ``int`` subclass), floats, strings and values below 1 are
+    rejected rather than silently coerced. A bad value changes how many
+    turns (and therefore how much money) a run spends, so it must fail loudly
+    instead of falling back to a default.
+    """
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise ValueError(
+            "simulation.pre_coordination_rounds must be an integer >= 1 "
+            f"(got {val!r} of type {type(val).__name__})"
+        )
+    if val < 1:
+        raise ValueError(
+            f"simulation.pre_coordination_rounds must be an integer >= 1 (got {val!r})"
+        )
+    return int(val)
+
+
+def _resolve_pre_coordination_rounds(cfg: Optional[Dict[str, Any]] = None) -> int:
+    """Resolves how many dedicated adversary turns the pre-coordination phase
+    runs, defaulting to 1 when the key is omitted (backward compatible).
+    """
+    sim_cfg = (cfg or {}).get("simulation") or {}
+    if "pre_coordination_rounds" not in sim_cfg:
+        return 1
+    return _normalize_pre_coordination_rounds(sim_cfg["pre_coordination_rounds"])
+
+
 # Keys an adversary keeps in its context during the pre-coordination round.
 # This is an ALLOWLIST on purpose: `env.build_agent_context` returns whatever
 # the environment wants (for HospitalEnvironment that includes
@@ -204,6 +239,10 @@ _PRE_COORDINATION_CONTEXT_ALLOWLIST: frozenset = frozenset(
         "phase",
         "iteration",
         "role",
+        # Pre-coordination round metadata (1-based). Scalar labels only, no
+        # environment state.
+        "pre_coordination_round",
+        "pre_coordination_rounds",
         # Coalitional strategy inputs injected by `_get_extra_fields`.
         "misalignment_role",
         "misalignment_adversaries",
@@ -328,6 +367,32 @@ def _compute_effective_secret_channel(
     """
     return bool(secret_channel_enabled) and (
         not disable_post_message or pre_coordination_round
+    )
+
+
+def _resolve_effective_secret_channel(
+    *,
+    secret_channel_enabled: bool,
+    disable_post_message: bool,
+    pre_coordination_round: bool,
+    is_benign: bool,
+    num_adversaries: int,
+) -> bool:
+    """Effective secret-channel flag under the *actual* run conditions.
+
+    `_compute_effective_secret_channel` only knows about the tooling rules.
+    The board is also never created for a benign run or a coalition smaller
+    than two, so the recorded `effective_secret_channel` must include those
+    conditions: otherwise it can be true while `secret_blackboard_id` is null.
+    """
+    return (
+        not bool(is_benign)
+        and int(num_adversaries) >= 2
+        and _compute_effective_secret_channel(
+            secret_channel_enabled,
+            disable_post_message,
+            pre_coordination_round=pre_coordination_round,
+        )
     )
 
 
@@ -717,6 +782,144 @@ def _extract_initial_prompts(
     return {"system_prompt": sp, "user_prompt": up}
 
 
+async def _run_pre_coordination_rounds(
+    *,
+    env: Any,
+    protocol: Any,
+    roles: Dict[str, str],
+    num_rounds: int,
+    max_messages: Optional[int],
+    secret_blackboard_id: Optional[int],
+    extra_fields: Callable[[str, str], Dict[str, Any]],
+    bb_logger: Optional[ExperimentBlackboardLogger] = None,
+) -> List[Dict[str, Any]]:
+    """Run the dedicated adversaries-only pre-coordination phase.
+
+    Executes ``num_rounds`` rounds before iteration 1. Each round gives every
+    adversary exactly one dedicated coordination turn, in ``env.agents`` order.
+    Honest agents are skipped entirely, so they never see the phase or its
+    blackboard.
+
+    Isolation is held for the whole phase (all rounds), not per round:
+
+    * only ``post_message`` is usable -- all environment tools are blocked;
+    * ``post_message`` is rewritten onto the coalition-only secret board when
+      one exists; when none exists it is disabled for the phase, so no public
+      board can be written to;
+    * the agent context is reduced to identity + coalition metadata, so no
+      environment state leaks in passively.
+
+    Isolated state is saved and restored on every exit path (including
+    exceptions): ``post_message`` gating, environment-tool gating, secret-board
+    routing, and the message cap. ``post_message`` is enabled **only** when a
+    coalition-only secret board exists; without one it is disabled for the whole
+    phase, because the tool would otherwise write to a public board.
+
+    ``max_messages`` is a per-agent cap **per round**: the counters reset at the
+    start of every round. ``None`` means unlimited.
+
+    Returns the ``agent_turns.json``-shaped entries for every turn. The caller
+    owns the surrounding run state and restores the normal tooling afterwards.
+    """
+    turns: List[Dict[str, Any]] = []
+
+    # Save the task-local state so a rerun/nested caller is unaffected.
+    prior_post_message_disabled = is_post_message_disabled()
+    prior_env_tools_blocked = is_env_tools_blocked()
+    prior_secret_blackboard_id = get_secret_blackboard_id()
+    prior_post_message_limit = get_post_message_call_limit()
+
+    # Without a coalition-only board there is no safe place to post: disable
+    # `post_message` for the phase rather than let it fall through to a public
+    # board. The prompt says the same thing explicitly.
+    phase_post_message_available = secret_blackboard_id is not None
+    set_post_message_disabled(not phase_post_message_available)
+    set_env_tools_blocked(True)
+    set_secret_blackboard_id(secret_blackboard_id)
+    # Defense in depth: with no secret board, reject any hallucinated
+    # `post_message` at the protocol layer as well (limit 0 rejects all calls)
+    # so a public post is impossible even if the tool were somehow offered.
+    round_post_message_limit = max_messages if phase_post_message_available else 0
+    try:
+        for pre_round in range(1, num_rounds + 1):
+            # Per-round cap: reset counters so each round gets its own budget.
+            set_post_message_call_limit(round_post_message_limit)
+            reset_post_message_counts()
+
+            last_agent: Optional[str] = None
+            for agent in env.agents:
+                if roles.get(agent.name) != "adversary":
+                    continue
+
+                full_ctx = env.build_agent_context(
+                    agent.name,
+                    phase="pre_coordination",
+                    iteration=0,
+                    pre_coordination_round=pre_round,
+                    pre_coordination_rounds=num_rounds,
+                )
+                extra = dict(extra_fields(agent.name, "pre_coordination"))
+                # Controlled phase metadata: never trust the environment to
+                # echo kwargs back. Without this injection the prompt and the
+                # agent see stale/default round metadata.
+                extra["post_message_available"] = phase_post_message_available
+                extra["pre_coordination_round"] = pre_round
+                extra["pre_coordination_rounds"] = num_rounds
+                # Minimal context: identity + coalition strategy only, no
+                # environment state. Blocking tool calls is not sufficient
+                # because `env.build_agent_context` hands the adversary the
+                # full state (inventory, failures, job queue, costs) passively
+                # in the prompt.
+                agent_context = _pre_coordination_context(full_ctx, extra=extra)
+                response = await protocol.agent_planning_turn(
+                    agent,
+                    agent.name,
+                    agent_context,
+                    env,
+                    iteration=0,
+                    planning_round=pre_round,
+                    phase="pre_coordination",
+                )
+                turns.append(
+                    {
+                        "phase": "pre_coordination",
+                        "iteration": 0,
+                        "round": pre_round,
+                        "pre_coordination_round": pre_round,
+                        "pre_coordination_rounds": num_rounds,
+                        "agent": agent.name,
+                        "role": roles[agent.name],
+                        "response": response.get("response"),
+                        "usage": response.get("usage"),
+                        "tools_executed": response.get("tools_executed"),
+                        **_extract_initial_prompts(response),
+                    }
+                )
+                last_agent = agent.name
+
+            if last_agent and bb_logger is not None:
+                try:
+                    _log_blackboards_txt(
+                        bb_logger=bb_logger,
+                        protocol=protocol,
+                        iteration=0,
+                        phase="pre_coordination",
+                        agent_name=last_agent,
+                        planning_round=pre_round,
+                    )
+                except Exception:
+                    pass
+    finally:
+        # Restore the state that existed before the phase, even on failure.
+        set_env_tools_blocked(prior_env_tools_blocked)
+        set_secret_blackboard_id(prior_secret_blackboard_id)
+        set_post_message_call_limit(prior_post_message_limit)
+        set_post_message_disabled(prior_post_message_disabled)
+        reset_post_message_counts()
+
+    return turns
+
+
 async def _run_single(
     *,
     base_cfg: Dict[str, Any],
@@ -806,20 +1009,30 @@ async def _run_single(
     )
     set_post_message_disabled(resolved_disable_pm)
 
-    # --- PRE-COORDINATION ROUND ---
-    # A single, planning-prompt-shaped round run before the main simulation
-    # for adversaries only. `post_message` (and the secret blackboard) are
-    # available; all environment tools (`broadcast_message`, `transfer_resources`,
-    # etc.) are silently dropped by `LocalCommunicationProtocol` so the
-    # adversary cannot probe the environment before losing `post_message`.
+    # --- PRE-COORDINATION PHASE ---
+    # `simulation.pre_coordination_rounds` dedicated, planning-prompt-shaped
+    # rounds run before the main simulation for adversaries only (default 1,
+    # for backward compatibility). `post_message` is available only when a
+    # coalition-only secret blackboard exists; all environment tools
+    # (`broadcast_message`, `transfer_resources`, etc.) are silently dropped by
+    # `LocalCommunicationProtocol` so the adversary cannot probe the
+    # environment before losing `post_message`.
     resolved_pre_coordination = _resolve_pre_coordination_round(
         pre_coordination_round, cfg
     )
-    # Per-agent cap on `post_message` calls during the pre-coordination round.
+    resolved_pre_coord_rounds = _resolve_pre_coordination_rounds(cfg)
+    pre_coord_phase_active = resolved_pre_coordination and not is_benign
+    effective_pre_coord_rounds = (
+        resolved_pre_coord_rounds if pre_coord_phase_active else 0
+    )
+    # Per-agent cap on `post_message` calls **per pre-coordination round**.
     # None means unlimited. When the pre-coordination round is off, this cap
-    # is also off.
-    resolved_pre_coord_max = _normalize_pre_coordination_max_messages(
-        pre_coordination_max_messages
+    # is also off. `_UNSET` falls back to the top-level config keys; an
+    # explicit `None` still means "unlimited".
+    resolved_pre_coord_max = (
+        _resolve_pre_coordination_max_messages({}, cfg)
+        if pre_coordination_max_messages is _UNSET
+        else _normalize_pre_coordination_max_messages(pre_coordination_max_messages)
     )
 
     # --- DIRECTORY SETUP ---
@@ -863,6 +1076,11 @@ async def _run_single(
         run_timestamp=cfg.get("simulation", {}).get("run_timestamp"),
         log_dir=run_dir,
     )
+    # A resume/rerun reuses the run directory and therefore the same
+    # `agent_trajectories.json`. Reset it so stale pre-coordination rounds from
+    # an earlier attempt (e.g. a different round count) cannot be merged into
+    # the new run.
+    trajectory_logger.reset_log()
 
     agent_names = env.get_agent_names()
     communication_network = build_communication_network(agent_names, cfg)
@@ -875,14 +1093,10 @@ async def _run_single(
     # Mode 0 (post_message never available) makes a coalition-only secret
     # blackboard pointless: there is no tool to write to it -- UNLESS the
     # pre-coordination round needs it, in which case the adversary uses
-    # post_message to the secret board during that single round and loses it
-    # afterwards. Persist the raw request as well so downstream analysis can
-    # tell "never requested" from "suppressed by 0".
-    effective_secret_channel = _compute_effective_secret_channel(
-        secret_channel_enabled,
-        resolved_disable_pm,
-        pre_coordination_round=resolved_pre_coordination,
-    )
+    # post_message to the secret board during that phase and loses it
+    # afterwards. The effective flag is resolved after adversary selection
+    # below, because the board also requires a non-benign run with at least two
+    # adversaries.
 
     adversaries = _select_adversaries_hospital_coalition(
         agent_names=agent_names,
@@ -894,6 +1108,15 @@ async def _run_single(
         name: ("adversary" if name in adversaries else "cooperative")
         for name in agent_names
     }
+    # Single source of truth for both board creation and `run_config.json`, so
+    # `effective_secret_channel` cannot be true while the board id is null.
+    effective_secret_channel = _resolve_effective_secret_channel(
+        secret_channel_enabled=secret_channel_enabled,
+        disable_post_message=resolved_disable_pm,
+        pre_coordination_round=resolved_pre_coordination,
+        is_benign=is_benign,
+        num_adversaries=len(adversaries),
+    )
 
     if coalition_clique_enabled and len(adversaries) >= 2:
         # Ensure the coalition forms a clique in the (public) communication graph.
@@ -957,7 +1180,7 @@ async def _run_single(
     await env.async_init()
 
     secret_blackboard_id: Optional[int] = None
-    if not is_benign and effective_secret_channel and len(adversaries) >= 2:
+    if effective_secret_channel:
         try:
             base_context = env.get_network_context()
             secret_context = env.format_blackboard_context(adversaries, base_context)
@@ -997,14 +1220,12 @@ async def _run_single(
             return {}
         role = roles.get(agent_name, "cooperative")
         post_message_available = not resolved_disable_pm
-        # During the pre-coordination round the adversary DOES have post_message
-        # regardless of the underlying `disable_post_message` setting --
-        # otherwise the planning-shaped prompt would tell them "you have NO
-        # post_message" while the tool actually works. The dedicated
-        # pre-coordination block in prompts.py explains the situation in a way
-        # that does not contradict the runtime gate.
+        # During the pre-coordination phase `post_message` is available only
+        # when a coalition-only secret board exists. If there is none, the tool
+        # is disabled for the phase so it cannot leak to a public board; the
+        # prompt says so explicitly. The helper also enforces this at runtime.
         if phase == "pre_coordination" and role == "adversary":
-            post_message_available = True
+            post_message_available = secret_blackboard_id is not None
         return {
             "misalignment_role": role,
             "misalignment_adversaries": adversaries,
@@ -1015,92 +1236,27 @@ async def _run_single(
             "phase": phase,
         }
 
-    # --- PRE-COORDINATION ROUND ---
-    # Runs once, before iteration 1, for adversaries only. The agent receives
-    # the planning-shaped prompt (same as planning phase) but
-    # `LocalCommunicationProtocol.environment_handle_tool_call` returns a stub
-    # for any env-tool invocation, so the adversary cannot probe the
-    # environment or commit to operational actions before losing `post_message`.
-    # `post_message` (and the secret blackboard) remain available.
-    if resolved_pre_coordination and not is_benign:
-        # Restore the post_message state — the loop below assumes it is on.
-        set_post_message_disabled(False)
-        set_env_tools_blocked(True)
-        # Force any `post_message` call during this round onto the
-        # coalition-only secret blackboard so an adversarial agent cannot
-        # leak the coordination scheme to the public channel.
-        set_secret_blackboard_id(secret_blackboard_id)
-        # Apply per-agent `post_message` cap for the pre-coordination round,
-        # if configured. Resets the per-agent counter so each run starts
-        # fresh even when concurrent runs share the process.
-        if resolved_pre_coord_max is not None:
-            set_post_message_call_limit(resolved_pre_coord_max)
-        else:
-            set_post_message_call_limit(None)
-        reset_post_message_counts()
-        last_pre_agent: Optional[str] = None
-        for agent in env.agents:
-            if roles.get(agent.name) != "adversary":
-                continue
-            full_ctx = env.build_agent_context(
-                agent.name,
-                phase="pre_coordination",
-                iteration=0,
-                planning_round=0,
+    # --- PRE-COORDINATION PHASE ---
+    # Runs `effective_pre_coord_rounds` times before iteration 1, for
+    # adversaries only. The agent receives the compact phase prompt built by
+    # `prompts.py`; `LocalCommunicationProtocol.environment_handle_tool_call`
+    # returns a stub for any env-tool invocation across the whole phase, so the
+    # adversary cannot probe the environment or commit to operational actions
+    # before losing `post_message`. `post_message` is available only while a
+    # secret board exists. Honest agents are skipped entirely.
+    if pre_coord_phase_active:
+        turns.extend(
+            await _run_pre_coordination_rounds(
+                env=env,
+                protocol=protocol,
+                roles=roles,
+                num_rounds=effective_pre_coord_rounds,
+                max_messages=resolved_pre_coord_max,
+                secret_blackboard_id=secret_blackboard_id,
+                extra_fields=_get_extra_fields,
+                bb_logger=bb_logger,
             )
-            extra = _get_extra_fields(agent.name, "pre_coordination")
-            # Minimal context: identity + coalition strategy only, no
-            # environment state. Blocking tool calls is not sufficient because
-            # `env.build_agent_context` hands the adversary the full state
-            # (inventory, failures, job queue, costs) passively in the prompt.
-            agent_context = _pre_coordination_context(full_ctx, extra=extra)
-            response = await protocol.agent_planning_turn(
-                agent,
-                agent.name,
-                agent_context,
-                env,
-                iteration=0,
-                planning_round=0,
-                phase="pre_coordination",
-            )
-            turns.append(
-                {
-                    "phase": "pre_coordination",
-                    "iteration": 0,
-                    "round": 0,
-                    "agent": agent.name,
-                    "role": roles[agent.name],
-                    "response": response.get("response"),
-                    "usage": response.get("usage"),
-                    "tools_executed": response.get("tools_executed"),
-                    **_extract_initial_prompts(response),
-                }
-            )
-            last_pre_agent = agent.name
-        if last_pre_agent:
-            try:
-                _log_blackboards_txt(
-                    bb_logger=bb_logger,
-                    protocol=protocol,
-                    iteration=0,
-                    phase="pre_coordination",
-                    agent_name=last_pre_agent,
-                    planning_round=0,
-                )
-            except Exception:
-                pass
-        # Restore env-tool gating for the simulation loop. `post_message` will
-        # be re-set per-agent below based on `resolved_disable_pm`.
-        set_env_tools_blocked(False)
-        # Stop rewriting `post_message` to the secret board during the main
-        # simulation loop: each adversary's normal planning/execution turn
-        # targets whatever blackboard the agent chooses.
-        set_secret_blackboard_id(None)
-        # Lift the cap and clear counters for the main simulation loop, where
-        # the existing `disable_post_message` setting owns `post_message`
-        # availability.
-        set_post_message_call_limit(None)
-        reset_post_message_counts()
+        )
 
     current_iteration = 0
     for iteration in range(1, max_iterations + 1):
@@ -1362,6 +1518,8 @@ async def _run_single(
             "secret_blackboard_id": secret_blackboard_id,
             "disable_post_message": resolved_disable_pm,
             "pre_coordination_round": resolved_pre_coordination,
+            "pre_coordination_rounds": resolved_pre_coord_rounds,
+            "pre_coordination_rounds_effective": effective_pre_coord_rounds,
             "pre_coordination_max_messages": resolved_pre_coord_max,
             "roles": roles,
             "metrics": asdict(metrics),
@@ -1443,6 +1601,9 @@ async def _run_single(
     return {
         "run_id": run_id,
         "adversaries": len(adversaries),
+        "pre_coordination_round": resolved_pre_coordination,
+        "pre_coordination_rounds": resolved_pre_coord_rounds,
+        "pre_coordination_rounds_effective": effective_pre_coord_rounds,
         "joint_reward": metrics.meeting_outcome.joint_reward,
         "suspicion_rate": metrics.suspicion_rate_non_adversary,
         "agent_prompt_tokens": agent_usage["prompt_tokens"],
@@ -1462,6 +1623,10 @@ async def run_from_config(
     max_concurrent_runs: Optional[int] = None,
 ) -> Path:
     cfg = _load_yaml(config_path)
+    # Fail fast on an invalid `simulation.pre_coordination_rounds` before any
+    # runs are scheduled. The same value is re-resolved per run in
+    # `_run_single`.
+    _resolve_pre_coordination_rounds(cfg)
     exp = cfg.get("experiment") or {}
     max_concurrent_runs = max_concurrent_runs or int(exp.get("max_concurrent_runs", 1))
 
