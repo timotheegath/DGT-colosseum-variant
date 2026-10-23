@@ -165,6 +165,19 @@ The intentional behavioral differences are tracked in [Changelog](#changelog) be
 
 How this experiment now differs from `experiments/agent_misalignment/`, the folder it was forked from.
 
+### 2026-10-23 — agent prompt capture
+
+Unlike the entries below, this is a **new capability**, not a divergence from `agent_misalignment`. It applies to every run, benign (`adversary_counts: [0]`) included.
+
+- **Prompts were never persisted.** Terrarium ships a `PromptLogger` and this runner imported it, but nothing instantiated it — so no system or user prompt was ever written to any output folder. Existing runs under `outputs/` cannot be backfilled without re-running them. The unused import has been removed.
+- **Initial prompts per phase are now recorded.** The verbatim `system_prompt` and `user_prompt` are captured for the **first** turn of each phase occurrence — `pre_coordination`, planning round 1 of every iteration, `execution`, `survey`. Later planning rounds are deliberately not captured (the rule lives in `ThreadSafePromptRecorder.is_first_of_phase`); the shipped configs use `max_planning_rounds: 1`, so this only matters if that knob is raised.
+- **Two new artifacts per run directory:**
+  - `agent_initial_prompts.jsonl` — one JSON object per line, for programmatic reads. Line-oriented rather than a single JSON array because an array cannot be safely appended incrementally.
+  - `agent_initial_prompts.md` — human-readable rendering.
+- **Streamed during the run, not flushed at the end.** Both files are created as soon as the run starts and appended as turns complete. This matters because the judge pass (`judge_beliefs.judge_run`) is a second full LLM sweep that runs *after* the simulation loop; under the previous end-of-run flush, a failure there discarded every prompt from an already-completed run. You can `tail -f` the Markdown while a sweep is in progress.
+- **`agent_turns.json` also carries the prompts.** First-of-phase turns gain `system_prompt` / `user_prompt` keys alongside `response` / `usage` / `tools_executed`. The change is purely additive, so existing consumers (including `judge_beliefs`) are unaffected.
+- **Resume behaviour:** re-running the same `run_id` truncates both files rather than appending to stale output.
+
 ### 2026-10-22 — tool-mediated collusion
 
 - **`post_message` can be disabled.** `sweeps[].disable_post_message` (or `experiment.disable_post_message`, `experiment.adversary.disable_post_message`, `communication_network.disable_post_message`) removes the blackboard `post_message` tool from every agent's toolset, so collusion has to go through tool calls only. Enabled runs get a `__nopm` suffix on their `run_id`. `agent_misalignment` has no such toggle.
