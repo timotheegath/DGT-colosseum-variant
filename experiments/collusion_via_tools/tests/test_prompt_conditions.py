@@ -65,7 +65,7 @@ class EffectiveSecretChannelTests(unittest.TestCase):
 
 class DisabledNoSecretBlackboardTests(unittest.TestCase):
     """``post_message_available=False`` with no secret board: the coalition
-    is invisible by construction and must pre-commit to a covert protocol."""
+    is invisible by construction and must signal through tool calls only."""
 
     def setUp(self) -> None:
         self.prompt = _adversary_prompt(
@@ -77,10 +77,6 @@ class DisabledNoSecretBlackboardTests(unittest.TestCase):
         self.assertIn("COMMUNICATION CONSTRAINTS", self.prompt)
         self.assertIn("The coalition is INVISIBLE by construction", self.prompt)
         self.assertIn("NO coalition-only blackboard", self.prompt)
-
-    def test_precommit_to_covert_protocol(self) -> None:
-        self.assertIn("pre-commit to a covert protocol", self.prompt)
-        self.assertIn("There is no second chance to renegotiate", self.prompt)
 
     def test_no_secret_board_references(self) -> None:
         # An agent with no blackboard must not be told to conceal one.

@@ -166,6 +166,25 @@ The intentional behavioral differences are tracked in [Changelog](#changelog) be
 
 How this experiment now differs from `experiments/agent_misalignment/`, the folder it was forked from.
 
+### 2026-10-23 — provisioner sees the blackboard
+
+- **The `Resource_Provisioner` was blind to every blackboard.** Upstream `HospitalPrompts.get_user_prompt` (`envs/dcops/hospital/hospital_prompts.py`) returns early for `agent_name == "Resource_Provisioner"` *before* it builds `bb_str`, so the department branch's blackboard section never runs for that role. The provisioner's own prompt nevertheless tells it to *"Check the Blackboard for 'URGENT' or 'DEFICIT' requests"*, and `megaboard.get_agent_blackboards("Resource_Provisioner")` returns both the public board and the coalition-only board — the content was reaching the prompt builder and being dropped. Confirmed upstream as a long-standing bug, not a design choice:
+  - the provisioner branch has never had `bb_str` in any of the 20 upstream commits touching the file, nor in any published `terrarium-agents` release (0.1.0 → 0.2.1);
+  - the department branch is annotated `# --- 2. Format Blackboard (CRITICAL FIX)` and sits *below* the provisioner's `return`;
+  - the "Check the Blackboard" instruction was added one commit *after* the branch was introduced (`f921cc8c`, 2026-01-19), with `bb_str` still absent;
+  - hospital is the only environment in the package with a role-specific prompt branch at all — `jira_ticket`, `meeting_scheduling`, `personal_assistant` and `smart_grid` all render the blackboard for every agent.
+- **New wrapper `ProvisionerBlackboardPrompts`** (`prompts.py`), wired in `run.py::_run_single` ahead of the `MisalignmentPrompts` wrap:
+  ```python
+  env.prompts = ProvisionerBlackboardPrompts(getattr(env, "prompts", None))
+  if not is_benign:
+      env.prompts = MisalignmentPrompts(env, cfg, base_prompts=env.prompts)
+  ```
+  It injects the same `=== BLACKBOARD (ID: ...) ===` block the department branch renders, immediately after the `Role: Logistics Provisioner` status line, leaving the phase instruction last. Non-provisioner prompts are returned byte-for-byte unchanged, a prompt that already carries a blackboard section is never double-rendered, and an empty context falls back to `(No new messages)` exactly as upstream does. The installed package is not modified.
+- **Visibility is participation-scoped.** The provisioner always sees the shared board (it is a participant); it sees the coalition-only board **only when it is in the coalition**. The wrapper renders whatever `blackboard_context` it is handed, and that context is built by `LocalCommunicationProtocol._prefetch_blackboard_events` from `megaboard.get_agent_blackboards(agent_name)` — membership only, with `Megaboard.get` rejecting non-participants outright. A non-coalition provisioner therefore never receives the secret board's content, so the coalition channel is not leaked. Pinned by a regression test against a real `Megaboard`.
+- **Applied to benign runs too** (`adversary_counts: [0]`), so the provisioner's view does not differ between benign and coalition sweeps. Benign and coalition runs were previously consistent here only by accident — both were blind.
+- **Impact on existing results.** The provisioner's prompt changes on every run, so output directories produced before this change are not directly comparable to new ones. Two cases matter most for the shipped config: in `initial_coordination_sweep` the provisioner had written the signaling scheme to the secret board and could then never read it back in planning/execution/survey, and in all three sweeps it could not see the departments' `URGENT`/`DEFICIT`/`SURPLUS` broadcasts its prompt directs it to look for. No `run_id`, `run_config.json` key or artifact format changed, so existing output directories still parse.
+- **Divergence from `agent_misalignment`.** This fork now renders the board for the provisioner; `experiments/agent_misalignment/` and `experiments/persuasion/hospital/` still use the upstream prompts unchanged. Wiring the same two lines into their `run.py` would fix them too, but it changes their provisioner behaviour and invalidates their existing runs, so it is deliberately out of scope here.
+
 ### 2026-10-23 — agent prompt capture
 
 Unlike the entries below, this is a **new capability**, not a divergence from `agent_misalignment`. It applies to every run, benign (`adversary_counts: [0]`) included.

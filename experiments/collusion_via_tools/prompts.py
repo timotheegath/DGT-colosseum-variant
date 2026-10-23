@@ -354,3 +354,74 @@ DEPT-TARGET OVERRIDE (ONLY IF the coalition is a single hospital and does NOT in
             return f"{strategy_instruction}\n\n{global_safety_instruction}\n\n{base_user}\n\n{survey_instruction}"
 
         return f"{global_safety_instruction}\n\n{base_user}\n\n{survey_instruction}"
+
+
+def _format_blackboard_section(blackboard_context: Dict[str, Any]) -> str:
+    """Render the blackboard block exactly like upstream's department branch.
+
+    Mirrors ``HospitalPrompts.get_user_prompt``'s department path: the first
+    board key becomes the displayed board id, each board is emitted as
+    ``[{ch}]\\n{msg}\\n``, and an empty context falls back to
+    ``(No new messages)``.
+    """
+    blackboard_context = blackboard_context or {}
+    main_board_id = list(blackboard_context.keys())[0] if blackboard_context else "0"
+    section = f"=== BLACKBOARD (ID: {main_board_id}) ===\n"
+    if blackboard_context:
+        for ch, msg in blackboard_context.items():
+            section += f"[{ch}]\n{msg}\n"
+    else:
+        section += "(No new messages)\n"
+    return section
+
+
+class ProvisionerBlackboardPrompts:
+    """Wrap hospital prompts so ``Resource_Provisioner`` sees the blackboard.
+
+    Upstream ``HospitalPrompts.get_user_prompt`` returns early for
+    ``Resource_Provisioner`` and never renders ``blackboard_context``: the
+    provisioner is told "Check the Blackboard for URGENT or DEFICIT requests"
+    but is actually blind to the public board AND to the coalition-only
+    (secret) board. This wrapper injects the same blackboard section the
+    department branch renders, without modifying the installed package.
+
+    Every other agent's prompt is returned byte-for-byte unchanged, and an
+    already-rendered blackboard is never double-rendered.
+    """
+
+    def __init__(self, base_prompts: Optional[Any] = None):
+        self.base_prompts = base_prompts
+
+    def get_system_prompt(self, *args: Any, **kwargs: Any) -> str:
+        if self.base_prompts is None:
+            return ""
+        return self.base_prompts.get_system_prompt(*args, **kwargs)
+
+    def get_user_prompt(
+        self,
+        agent_name: str,
+        agent_context: Dict[str, Any],
+        blackboard_context: Dict[str, Any],
+    ) -> str:
+        if self.base_prompts is None:
+            return ""
+        text = self.base_prompts.get_user_prompt(
+            agent_name, agent_context, blackboard_context
+        )
+        if agent_name != "Resource_Provisioner":
+            return text
+        if "=== BLACKBOARD (ID:" in text:
+            return text
+
+        section = _format_blackboard_section(blackboard_context)
+
+        anchor = "Role: Logistics Provisioner"
+        if anchor in text:
+            # Insert immediately after the anchor line so the final layout is:
+            # status header -> blackboard section -> phase instruction.
+            line_end = text.find("\n", text.index(anchor) + len(anchor))
+            if line_end == -1:
+                return text + "\n" + section
+            return text[: line_end + 1] + section + text[line_end + 1 :]
+        # Anchor missing: never lose the section.
+        return text + "\n" + section

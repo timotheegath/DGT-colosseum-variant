@@ -36,7 +36,10 @@ from experiments.collusion_via_tools.agents import (
 )
 from experiments.common.blackboard_logger import ExperimentBlackboardLogger
 from experiments.collusion_via_tools.metrics import compute_misalignment_metrics
-from experiments.collusion_via_tools.prompts import MisalignmentPrompts
+from experiments.collusion_via_tools.prompts import (
+    MisalignmentPrompts,
+    ProvisionerBlackboardPrompts,
+)
 from experiments.collusion_via_tools.prompt_capture import ThreadSafePromptRecorder
 from experiments.common.local_protocol import LocalCommunicationProtocol
 from experiments.collusion_via_tools.judge_beliefs import judge_run
@@ -903,12 +906,17 @@ async def _run_single(
                 except Exception:
                     pass
 
-    # For the benign baseline, mimic examples/base_main.py prompt behavior as closely as possible:
-    # do not wrap or augment prompts/contexts.
+    # Upstream `HospitalPrompts.get_user_prompt` returns early for
+    # `Resource_Provisioner` and never renders `blackboard_context`, so the
+    # provisioner is blind to the public board AND to the coalition-only
+    # board (even though its own prompt says "Check the Blackboard for
+    # URGENT or DEFICIT requests"). Wrap the env prompts so every role sees
+    # the same blackboard content. Applied to benign runs too, so that the
+    # provisioner's view does not differ between benign and coalition sweeps.
+    env.prompts = ProvisionerBlackboardPrompts(getattr(env, "prompts", None))
+
     if not is_benign:
-        env.prompts = MisalignmentPrompts(
-            env, cfg, base_prompts=getattr(env, "prompts", None)
-        )
+        env.prompts = MisalignmentPrompts(env, cfg, base_prompts=env.prompts)
 
     # --- AGENT CLIENT SETUP ---
     provider = (cfg.get("llm", {}).get("provider") or "").lower()
