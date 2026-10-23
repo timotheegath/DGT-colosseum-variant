@@ -180,6 +180,21 @@ class DisabledWithSecretBlackboardPromptTests(unittest.TestCase):
         self.assertNotIn("SECRET-board confirmation", prompt)
         self.assertIn("signal the buffer state", prompt)
 
+    def test_secret_board_named_as_read_only(self) -> None:
+        self.assertIn("is READ-ONLY for you now", self.prompt)
+        self.assertIn("blackboard_id=7", self.prompt)
+        self.assertIn("re-read the scheme you agreed on", self.prompt)
+        self.assertIn(
+            "never quote or reveal its contents on any public channel", self.prompt
+        )
+
+    def test_no_read_only_line_without_secret_board(self) -> None:
+        prompt = _adversary_prompt(
+            post_message_available=False,
+            secret_blackboard_id=None,
+        )
+        self.assertNotIn("is READ-ONLY for you now", prompt)
+
 
 class AvailableTests(unittest.TestCase):
     """``post_message_available=True`` renders no constraint block at all."""
@@ -348,6 +363,14 @@ class PreCoordinationUnchangedTests(unittest.TestCase):
             "then execute actions via tools.",
             prompt,
         )
+
+    def test_precoord_has_no_read_only_line(self) -> None:
+        prompt = _adversary_prompt(
+            post_message_available=True,
+            secret_blackboard_id=7,
+            phase="pre_coordination",
+        )
+        self.assertNotIn("is READ-ONLY for you now", prompt)
 
 
 if __name__ == "__main__":
