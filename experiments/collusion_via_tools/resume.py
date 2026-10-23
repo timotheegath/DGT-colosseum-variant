@@ -94,10 +94,38 @@ def _load_config(path: Path) -> Dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
-def _is_run_complete(run_dir: Path) -> bool:
+def _has_error_turn(run_dir: Path) -> bool:
+    """Whether the run recorded at least one failed turn.
+
+    A turn whose LLM call raised is recorded with an ``"[ERROR] ..."``
+    response (the same convention terrarium uses for caught continuation
+    failures). Such a run has all of its artifacts, but at least one agent's
+    turn never happened, so its metrics do not describe a full simulation and
+    it must be re-run rather than accepted as complete.
+    """
+    turns_path = run_dir / "agent_turns.json"
+    try:
+        turns = json.loads(turns_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # Unreadable turns are treated as incomplete rather than complete.
+        return True
+    if not isinstance(turns, list):
+        return True
+    for turn in turns:
+        response = turn.get("response") if isinstance(turn, dict) else None
+        if isinstance(response, str) and response.startswith("[ERROR]"):
+            return True
+    return False
+
+
+def _is_run_complete(run_dir: Path, *, rerun_error_turns: bool = True) -> bool:
     if not run_dir.exists():
         return False
-    return all((run_dir / fname).exists() for fname in REQUIRED_RUN_FILES)
+    if not all((run_dir / fname).exists() for fname in REQUIRED_RUN_FILES):
+        return False
+    if rerun_error_turns and _has_error_turn(run_dir):
+        return False
+    return True
 
 
 def _run_pre_coordination_treatment(
@@ -141,7 +169,9 @@ def _expected_pre_coordination_treatment(spec: "RunSpec") -> Tuple[bool, int]:
     return True, int(spec.pre_coordination_rounds)
 
 
-def _run_matches_spec(run_dir: Path, spec: "RunSpec") -> bool:
+def _run_matches_spec(
+    run_dir: Path, spec: "RunSpec", *, rerun_error_turns: bool = True
+) -> bool:
     """Whether a completed run directory matches the spec's treatment.
 
     File presence is not enough: a run produced with a different
@@ -149,7 +179,7 @@ def _run_matches_spec(run_dir: Path, spec: "RunSpec") -> bool:
     complete. `run_id` intentionally stays stable, so this metadata is the
     only place the difference is observable.
     """
-    if not _is_run_complete(run_dir):
+    if not _is_run_complete(run_dir, rerun_error_turns=rerun_error_turns):
         return False
     try:
         run_config = json.loads(
@@ -253,7 +283,7 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
 
 
 def _select_incomplete_runs(
-    *, root: Path, cfg: Dict[str, Any]
+    *, root: Path, cfg: Dict[str, Any], rerun_error_turns: bool = True
 ) -> Tuple[List[RunSpec], int, int]:
     expected = list(_iter_expected_run_specs(cfg))
     total_runs = len(expected)
@@ -264,7 +294,10 @@ def _select_incomplete_runs(
             root / "runs" / spec.model_label / spec.sweep_name / run_id
             for run_id in spec.run_id_candidates
         ]
-        if any(_run_matches_spec(d, spec) for d in run_dirs):
+        if any(
+            _run_matches_spec(d, spec, rerun_error_turns=rerun_error_turns)
+            for d in run_dirs
+        ):
             completed += 1
         else:
             incomplete.append(spec)
@@ -278,12 +311,15 @@ async def resume_runs(
     max_concurrent_runs: int,
     stop_on_error: bool,
     dry_run: bool,
+    rerun_error_turns: bool = True,
 ) -> None:
     run_mod._resolve_pre_coordination_rounds(cfg)
     run_mod._ensure_dir(root)
     run_mod._configure_experiment_logging(root)
 
-    to_run, completed, total_runs = _select_incomplete_runs(root=root, cfg=cfg)
+    to_run, completed, total_runs = _select_incomplete_runs(
+        root=root, cfg=cfg, rerun_error_turns=rerun_error_turns
+    )
     failed = 0
 
     run_mod.logger.info(
@@ -504,6 +540,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument(
         "--dry-run", action="store_true", help="Print what would run and exit."
     )
+    parser.add_argument(
+        "--no-rerun-error-turns",
+        action="store_true",
+        help=(
+            "Accept runs that recorded a failed turn as complete. By default a "
+            'run whose agent_turns.json holds an "[ERROR] ..." response is '
+            "re-run, because at least one agent's turn never happened."
+        ),
+    )
     args = parser.parse_args(argv)
 
     root = Path(args.root)
@@ -524,6 +569,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             max_concurrent_runs=max_concurrent_runs,
             stop_on_error=bool(args.stop_on_error),
             dry_run=bool(args.dry_run),
+            rerun_error_turns=not bool(args.no_rerun_error_turns),
         )
     )
 

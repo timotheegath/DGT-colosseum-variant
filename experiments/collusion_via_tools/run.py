@@ -26,6 +26,7 @@ from experiments.common.run_utils import (
     ensure_dir as _ensure_dir,
     load_yaml as _load_yaml,
     normalize_seeds as _normalize_seeds,
+    atomic_write_json,
     write_json as _write_json,
     write_progress as _write_progress,
 )
@@ -782,6 +783,12 @@ def _extract_initial_prompts(
     return {"system_prompt": sp, "user_prompt": up}
 
 
+def _error_response(exc: BaseException) -> str:
+    """Render a failed turn in the same ``[ERROR] ...`` convention terrarium
+    itself uses for caught continuation failures."""
+    return f"[ERROR] {type(exc).__name__}: {exc}"
+
+
 async def _run_pre_coordination_rounds(
     *,
     env: Any,
@@ -792,6 +799,7 @@ async def _run_pre_coordination_rounds(
     secret_blackboard_id: Optional[int],
     extra_fields: Callable[[str, str], Dict[str, Any]],
     bb_logger: Optional[ExperimentBlackboardLogger] = None,
+    on_turn: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> List[Dict[str, Any]]:
     """Run the dedicated adversaries-only pre-coordination phase.
 
@@ -871,15 +879,41 @@ async def _run_pre_coordination_rounds(
                 # full state (inventory, failures, job queue, costs) passively
                 # in the prompt.
                 agent_context = _pre_coordination_context(full_ctx, extra=extra)
-                response = await protocol.agent_planning_turn(
-                    agent,
-                    agent.name,
-                    agent_context,
-                    env,
-                    iteration=0,
-                    planning_round=pre_round,
-                    phase="pre_coordination",
-                )
+                try:
+                    response = await protocol.agent_planning_turn(
+                        agent,
+                        agent.name,
+                        agent_context,
+                        env,
+                        iteration=0,
+                        planning_round=pre_round,
+                        phase="pre_coordination",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Pre-coordination planning turn failed for %s (round %s): %s",
+                        agent.name,
+                        pre_round,
+                        _error_response(exc),
+                    )
+                    turns.append(
+                        {
+                            "phase": "pre_coordination",
+                            "iteration": 0,
+                            "round": pre_round,
+                            "pre_coordination_round": pre_round,
+                            "pre_coordination_rounds": num_rounds,
+                            "agent": agent.name,
+                            "role": roles[agent.name],
+                            "response": _error_response(exc),
+                            "usage": None,
+                            "tools_executed": [],
+                        }
+                    )
+                    if on_turn is not None:
+                        on_turn(turns)
+                    last_agent = agent.name
+                    continue
                 turns.append(
                     {
                         "phase": "pre_coordination",
@@ -895,6 +929,8 @@ async def _run_pre_coordination_rounds(
                         **_extract_initial_prompts(response),
                     }
                 )
+                if on_turn is not None:
+                    on_turn(turns)
                 last_agent = agent.name
 
             if last_agent and bb_logger is not None:
@@ -1255,6 +1291,7 @@ async def _run_single(
                 secret_blackboard_id=secret_blackboard_id,
                 extra_fields=_get_extra_fields,
                 bb_logger=bb_logger,
+                on_turn=lambda t: atomic_write_json(run_dir / "agent_turns.json", t),
             )
         )
 
@@ -1288,14 +1325,38 @@ async def _run_single(
                     base_ctx if not extra else _augment_context(base_ctx, extra=extra)
                 )
 
-                response = await protocol.agent_planning_turn(
-                    agent,
-                    agent.name,
-                    agent_context,
-                    env,
-                    iteration=iteration,
-                    planning_round=planning_round,
-                )
+                try:
+                    response = await protocol.agent_planning_turn(
+                        agent,
+                        agent.name,
+                        agent_context,
+                        env,
+                        iteration=iteration,
+                        planning_round=planning_round,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Planning turn failed for %s (iteration %s, round %s): %s",
+                        agent.name,
+                        iteration,
+                        planning_round,
+                        _error_response(exc),
+                    )
+                    turns.append(
+                        {
+                            "phase": "planning",
+                            "iteration": iteration,
+                            "round": planning_round,
+                            "agent": agent.name,
+                            "role": roles[agent.name],
+                            "response": _error_response(exc),
+                            "usage": None,
+                            "tools_executed": [],
+                        }
+                    )
+                    atomic_write_json(run_dir / "agent_turns.json", turns)
+                    last_agent = agent.name
+                    continue
                 turns.append(
                     {
                         "phase": "planning",
@@ -1309,6 +1370,7 @@ async def _run_single(
                         **_extract_initial_prompts(response),
                     }
                 )
+                atomic_write_json(run_dir / "agent_turns.json", turns)
                 last_agent = agent.name
 
             if last_agent:
@@ -1337,9 +1399,31 @@ async def _run_single(
                 base_ctx if not extra else _augment_context(base_ctx, extra=extra)
             )
 
-            response = await protocol.agent_execution_turn(
-                agent, agent.name, agent_context, env, iteration=iteration
-            )
+            try:
+                response = await protocol.agent_execution_turn(
+                    agent, agent.name, agent_context, env, iteration=iteration
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Execution turn failed for %s (iteration %s): %s",
+                    agent.name,
+                    iteration,
+                    _error_response(exc),
+                )
+                turns.append(
+                    {
+                        "phase": "execution",
+                        "iteration": iteration,
+                        "agent": agent.name,
+                        "role": roles[agent.name],
+                        "response": _error_response(exc),
+                        "usage": None,
+                        "tools_executed": [],
+                    }
+                )
+                atomic_write_json(run_dir / "agent_turns.json", turns)
+                last_exec_agent = agent.name
+                continue
             turns.append(
                 {
                     "phase": "execution",
@@ -1352,6 +1436,7 @@ async def _run_single(
                     **_extract_initial_prompts(response),
                 }
             )
+            atomic_write_json(run_dir / "agent_turns.json", turns)
             last_exec_agent = agent.name
 
         if last_exec_agent:
@@ -1382,13 +1467,34 @@ async def _run_single(
         agent_context = (
             base_ctx if not extra else _augment_context(base_ctx, extra=extra)
         )
-        response = await protocol.agent_survey_turn(
-            agent,
-            agent.name,
-            agent_context,
-            env,
-            iteration=max(1, current_iteration),
-        )
+        try:
+            response = await protocol.agent_survey_turn(
+                agent,
+                agent.name,
+                agent_context,
+                env,
+                iteration=max(1, current_iteration),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Survey turn failed for %s (iteration %s): %s",
+                agent.name,
+                max(1, current_iteration),
+                _error_response(exc),
+            )
+            turns.append(
+                {
+                    "phase": "survey",
+                    "iteration": current_iteration,
+                    "agent": agent.name,
+                    "role": roles[agent.name],
+                    "response": _error_response(exc),
+                    "usage": None,
+                    "tools_executed": [],
+                }
+            )
+            atomic_write_json(run_dir / "agent_turns.json", turns)
+            continue
         turns.append(
             {
                 "phase": "survey",
@@ -1401,9 +1507,10 @@ async def _run_single(
                 **_extract_initial_prompts(response),
             }
         )
+        atomic_write_json(run_dir / "agent_turns.json", turns)
 
     # Persist turns before the judge pass (judge_beliefs loads agent_turns.json).
-    _write_json(run_dir / "agent_turns.json", turns)
+    atomic_write_json(run_dir / "agent_turns.json", turns)
 
     final_summary = env.get_final_summary()
     # Include richer failure attribution when available (kept backward compatible).
