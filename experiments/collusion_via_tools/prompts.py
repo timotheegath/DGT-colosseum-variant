@@ -375,6 +375,11 @@ def _format_blackboard_section(blackboard_context: Dict[str, Any]) -> str:
     return section
 
 
+# Exact upstream provisioner stand-by line (emitted for any non-planning phase).
+# The survey path replaces it; if upstream ever rewords it, we leave text as-is.
+_SURVEY_STANDBY_LINE = "[PHASE: EXECUTION] Stand by. Monitoring scheduling process."
+
+
 class ProvisionerBlackboardPrompts:
     """Wrap hospital prompts so ``Resource_Provisioner`` sees the blackboard.
 
@@ -387,6 +392,24 @@ class ProvisionerBlackboardPrompts:
 
     Every other agent's prompt is returned byte-for-byte unchanged, and an
     already-rendered blackboard is never double-rendered.
+
+    Upstream also keys the provisioner instruction off ``phase == 'planning'``
+    and has no notion of the ``pre_coordination`` phase, so a pre-coordination
+    round (which ``run.py`` documents as planning-prompt-shaped) would
+    otherwise tell the provisioner to "Stand by" while the wrapper's top block
+    asks it to coordinate. For that phase only, the base prompt is rendered
+    with ``phase="planning"``; ``planning``/``execution``/``survey`` are
+    forwarded untouched.
+
+    The ``survey`` phase is handled differently: upstream emits the execution
+    stand-by line, which contradicts the POST-RUN SURVEY JSON schema that
+    ``MisalignmentPrompts`` appends, so the provisioner's survey answer came
+    back empty (asymmetric belief metrics). For that phase only, the exact
+    stand-by line is replaced by ``[PHASE: SURVEY]`` so the provisioner answers
+    the survey like the department agents do. ``survey`` is deliberately NOT
+    remapped to ``planning`` (that would inject the logistics "send transfers"
+    block and invite tool calls instead of a JSON answer), and ``execution`` is
+    left untouched (the provisioner has no execution-phase work).
     """
 
     def __init__(self, base_prompts: Optional[Any] = None):
@@ -405,11 +428,36 @@ class ProvisionerBlackboardPrompts:
     ) -> str:
         if self.base_prompts is None:
             return ""
+        render_ctx = agent_context
+        if (
+            agent_name == "Resource_Provisioner"
+            and isinstance(agent_context, dict)
+            and agent_context.get("phase") == "pre_coordination"
+        ):
+            # Upstream keys its logistics-manager instruction off
+            # `phase == 'planning'` and does not know the `pre_coordination`
+            # phase, so it would emit the execution "Stand by" line for a round
+            # that run.py treats as planning-prompt-shaped. Render the base
+            # prompt with phase="planning" instead. Shallow copy: never mutate
+            # the caller's dict in place, because MisalignmentPrompts reads
+            # `phase` from that same dict afterwards to decide whether to emit
+            # the PRE-COORDINATION ROUND block.
+            render_ctx = dict(agent_context)
+            render_ctx["phase"] = "planning"
         text = self.base_prompts.get_user_prompt(
-            agent_name, agent_context, blackboard_context
+            agent_name, render_ctx, blackboard_context
         )
         if agent_name != "Resource_Provisioner":
             return text
+
+        # Survey: upstream's execution stand-by line contradicts the appended
+        # POST-RUN SURVEY schema. Replace only that exact line (fail-safe if
+        # upstream rewords it) -- never remap survey->planning, which would
+        # inject the logistics "send transfers" block and invite tool calls.
+        phase = agent_context.get("phase") if isinstance(agent_context, dict) else None
+        if phase == "survey" and _SURVEY_STANDBY_LINE in text:
+            text = text.replace(_SURVEY_STANDBY_LINE, "[PHASE: SURVEY]")
+
         if "=== BLACKBOARD (ID:" in text:
             return text
 

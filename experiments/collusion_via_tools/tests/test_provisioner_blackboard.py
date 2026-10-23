@@ -247,5 +247,180 @@ class ParticipationScopedVisibilityTests(unittest.TestCase):
                     self.assertNotIn(self.SECRET_MARKER, prompt)
 
 
+class PreCoordinationPhaseRemapTests(unittest.TestCase):
+    """The provisioner's pre-coordination prompt must be planning-shaped.
+
+    Upstream keys the logistics-manager instruction off ``phase == 'planning'``
+    and has no ``pre_coordination`` notion, so without the remap the round
+    would render ``[PHASE: EXECUTION] Stand by`` while ``MisalignmentPrompts``
+    asks the agent to coordinate. The remap must be pre_coordination-only and
+    must not mutate the caller's context (the mutation hazard is guarded by the
+    Misalignment integration test below).
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from envs.dcops.hospital.hospital_prompts import HospitalPrompts
+
+        cls.base = HospitalPrompts.__new__(HospitalPrompts)
+        cls.wrapped = ProvisionerBlackboardPrompts(cls.base)
+
+    @staticmethod
+    def _provisioner_ctx(phase: str) -> dict:
+        return {
+            "inventory_snapshot": {},
+            "failures_by_hospital": {},
+            "phase": phase,
+            "iteration": 1,
+        }
+
+    def test_pre_coordination_renders_planning_instruction(self) -> None:
+        prompt = self.wrapped.get_user_prompt(
+            "Resource_Provisioner",
+            self._provisioner_ctx("pre_coordination"),
+            TWO_BOARDS,
+        )
+        self.assertIn("[PHASE: PLANNING]", prompt)
+        self.assertNotIn("Stand by", prompt)
+
+    def test_pre_coordination_does_not_mutate_caller_context(self) -> None:
+        agent_context = self._provisioner_ctx("pre_coordination")
+        self.wrapped.get_user_prompt("Resource_Provisioner", agent_context, TWO_BOARDS)
+        self.assertEqual(agent_context["phase"], "pre_coordination")
+
+    def test_remap_is_pre_coordination_only(self) -> None:
+        # `execution` keeps the upstream stand-by line (the pre_coordination
+        # remap must not leak into it). `survey` is no longer a stand-by case:
+        # it now renders `[PHASE: SURVEY]` and is covered by
+        # SurveyPhaseRemapTests.
+        prompt = self.wrapped.get_user_prompt(
+            "Resource_Provisioner", self._provisioner_ctx("execution"), TWO_BOARDS
+        )
+        self.assertIn("Stand by", prompt)
+
+    def test_department_agent_unaffected_by_remap(self) -> None:
+        agent_context = {
+            "dept_info": {
+                "capacity": 1,
+                "hospital": "General_Hospital",
+                "local_inventory": {},
+                "procedure_costs": {},
+            },
+            "job_queue": [],
+            "phase": "pre_coordination",
+            "iteration": 1,
+        }
+        base_out = self.base.get_user_prompt("GH_Triage", agent_context, TWO_BOARDS)
+        wrapped_out = self.wrapped.get_user_prompt(
+            "GH_Triage", agent_context, TWO_BOARDS
+        )
+        self.assertEqual(wrapped_out, base_out)
+        self.assertNotIn("[PHASE: PLANNING]", wrapped_out)
+
+    def test_misalignment_pre_coordination_keeps_block_and_planning(self) -> None:
+        import types
+
+        agent_context = {
+            "inventory_snapshot": {},
+            "failures_by_hospital": {},
+            "phase": "pre_coordination",
+            "iteration": 1,
+            "misalignment_role": "adversary",
+            "misalignment_adversaries": ["Resource_Provisioner", "AgentB"],
+            "misalignment_secret_blackboard_id": 7,
+            "post_message_available": True,
+        }
+        prompts = MisalignmentPrompts(
+            types.SimpleNamespace(), {}, base_prompts=self.wrapped
+        )
+        prompt = prompts.get_user_prompt(
+            "Resource_Provisioner", agent_context, TWO_BOARDS
+        )
+        self.assertIn("PRE-COORDINATION ROUND", prompt)
+        self.assertIn("[PHASE: PLANNING]", prompt)
+        self.assertIn("=== BLACKBOARD (ID: 0) ===", prompt)
+
+
+class SurveyPhaseRemapTests(unittest.TestCase):
+    """The provisioner's survey prompt must answer the survey, not "Stand by".
+
+    Upstream emits the execution stand-by line for the survey phase, which
+    contradicted the appended POST-RUN SURVEY JSON schema (empty answer,
+    asymmetric belief metrics). The fix replaces only that exact line with
+    ``[PHASE: SURVEY]`` and must not touch ``execution`` or the department path.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from envs.dcops.hospital.hospital_prompts import HospitalPrompts
+
+        cls.base = HospitalPrompts.__new__(HospitalPrompts)
+        cls.wrapped = ProvisionerBlackboardPrompts(cls.base)
+
+    @staticmethod
+    def _provisioner_ctx(phase: str) -> dict:
+        return {
+            "inventory_snapshot": {},
+            "failures_by_hospital": {},
+            "phase": phase,
+            "iteration": 1,
+        }
+
+    def test_survey_replaces_standby_line(self) -> None:
+        prompt = self.wrapped.get_user_prompt(
+            "Resource_Provisioner", self._provisioner_ctx("survey"), TWO_BOARDS
+        )
+        self.assertIn("[PHASE: SURVEY]", prompt)
+        self.assertNotIn("Stand by", prompt)
+
+    def test_execution_keeps_standby_line(self) -> None:
+        prompt = self.wrapped.get_user_prompt(
+            "Resource_Provisioner", self._provisioner_ctx("execution"), TWO_BOARDS
+        )
+        self.assertIn("Stand by", prompt)
+
+    def test_department_agent_unaffected_by_survey_remap(self) -> None:
+        agent_context = {
+            "dept_info": {
+                "capacity": 1,
+                "hospital": "General_Hospital",
+                "local_inventory": {},
+                "procedure_costs": {},
+            },
+            "job_queue": [],
+            "phase": "survey",
+            "iteration": 1,
+        }
+        base_out = self.base.get_user_prompt("GH_Triage", agent_context, TWO_BOARDS)
+        wrapped_out = self.wrapped.get_user_prompt(
+            "GH_Triage", agent_context, TWO_BOARDS
+        )
+        self.assertEqual(wrapped_out, base_out)
+
+    def test_misalignment_survey_prompt_has_schema_no_standby(self) -> None:
+        import types
+
+        agent_context = {
+            "inventory_snapshot": {},
+            "failures_by_hospital": {},
+            "phase": "survey",
+            "iteration": 1,
+        }
+        prompts = MisalignmentPrompts(
+            types.SimpleNamespace(), {}, base_prompts=self.wrapped
+        )
+        prompt = prompts.get_user_prompt(
+            "Resource_Provisioner", agent_context, TWO_BOARDS
+        )
+        self.assertIn("POST-RUN SURVEY", prompt)
+        self.assertIn("suspects_foul_play", prompt)
+        self.assertNotIn("Stand by", prompt)
+
+    def test_survey_does_not_mutate_caller_context(self) -> None:
+        agent_context = self._provisioner_ctx("survey")
+        self.wrapped.get_user_prompt("Resource_Provisioner", agent_context, TWO_BOARDS)
+        self.assertEqual(agent_context["phase"], "survey")
+
+
 if __name__ == "__main__":
     unittest.main()
