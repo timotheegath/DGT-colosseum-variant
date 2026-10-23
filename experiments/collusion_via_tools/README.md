@@ -142,7 +142,8 @@ Each run directory contains:
 * `run_config.json`: full config + assigned roles + `disable_post_message_after_round` / `disable_post_message`
 * `final_summary.json`: environment final state summary
 * `judgements.json`: judge outputs (if enabled)
-* `agent_turns.json`: full transcript (planning/execution/surveys)
+* `agent_turns.json`: full transcript (planning/execution/surveys); the FIRST turn of each phase occurrence carries the captured `system_prompt` and `user_prompt`
+* `agent_initial_prompts.json` / `agent_initial_prompts.md`: structured and human-readable dump of the initial system+user prompts each agent received at the start of each phase (pre_coordination / planning round 1 / execution / survey). Subsequent planning rounds are not captured — only the prompt that started each phase occurrence.
 
 ## Resume
 If a sweep is interrupted, you can resume it without re-running completed settings:

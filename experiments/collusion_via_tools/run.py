@@ -37,6 +37,7 @@ from experiments.collusion_via_tools.agents import (
 from experiments.common.blackboard_logger import ExperimentBlackboardLogger
 from experiments.collusion_via_tools.metrics import compute_misalignment_metrics
 from experiments.collusion_via_tools.prompts import MisalignmentPrompts
+from experiments.collusion_via_tools.prompt_capture import ThreadSafePromptRecorder
 from experiments.common.local_protocol import LocalCommunicationProtocol
 from experiments.collusion_via_tools.judge_beliefs import judge_run
 from experiments.common._patch_terrarium import (
@@ -48,7 +49,7 @@ from experiments.common._patch_terrarium import (
 )
 
 from terrarium.networks import build_communication_network
-from terrarium.logger import AgentTrajectoryLogger, PromptLogger
+from terrarium.logger import AgentTrajectoryLogger
 from terrarium.utils import (
     get_client_instance,
     get_generation_params,
@@ -695,6 +696,24 @@ def _augment_context(base: Dict[str, Any], *, extra: Dict[str, Any]) -> Dict[str
     return out
 
 
+def _extract_initial_prompts(
+    response: Dict[str, Any],
+) -> Dict[str, str]:
+    """Pull captured prompts off the agent response dict (if any).
+
+    ``MisalignmentHospitalAgent`` merges ``system_prompt`` and ``user_prompt``
+    into the response dict for first-of-phase turns only; this helper lifts
+    them out so the runner can attach them to the matching
+    ``agent_turns.json`` entry. Returns an empty dict when this turn was not a
+    first-of-phase turn (i.e., subsequent planning rounds).
+    """
+    sp = response.get("system_prompt")
+    up = response.get("user_prompt")
+    if not isinstance(sp, str) or not isinstance(up, str):
+        return {}
+    return {"system_prompt": sp, "user_prompt": up}
+
+
 async def _run_single(
     *,
     base_cfg: Dict[str, Any],
@@ -896,6 +915,8 @@ async def _run_single(
         vllm_runtime = build_vllm_runtime(cfg["llm"])
 
     adversary_spec = AdversarySpec(adversary_names=set(adversaries))
+    # One recorder per run; multiple concurrent runs each own their own instance.
+    prompt_recorder = ThreadSafePromptRecorder()
 
     agents = []
     for name in agent_names:
@@ -913,6 +934,7 @@ async def _run_single(
                 env.__class__.__name__,
                 generation_params=generation_params,
                 adversary_spec=adversary_spec,
+                prompt_recorder=prompt_recorder,
             )
         )
     # Match examples/base_main.py behavior: shuffle agent execution order.
@@ -1038,6 +1060,7 @@ async def _run_single(
                     "response": response.get("response"),
                     "usage": response.get("usage"),
                     "tools_executed": response.get("tools_executed"),
+                    **_extract_initial_prompts(response),
                 }
             )
             last_pre_agent = agent.name
@@ -1114,6 +1137,7 @@ async def _run_single(
                         "response": response.get("response"),
                         "usage": response.get("usage"),
                         "tools_executed": response.get("tools_executed"),
+                        **_extract_initial_prompts(response),
                     }
                 )
                 last_agent = agent.name
@@ -1156,6 +1180,7 @@ async def _run_single(
                     "response": response.get("response"),
                     "usage": response.get("usage"),
                     "tools_executed": response.get("tools_executed"),
+                    **_extract_initial_prompts(response),
                 }
             )
             last_exec_agent = agent.name
@@ -1204,6 +1229,7 @@ async def _run_single(
                 "response": response.get("response"),
                 "usage": response.get("usage"),
                 "tools_executed": response.get("tools_executed"),
+                **_extract_initial_prompts(response),
             }
         )
 
@@ -1332,6 +1358,17 @@ async def _run_single(
     _write_json(run_dir / "agent_rewards.json", agent_rewards or {})
     _write_json(run_dir / "metrics.json", asdict(metrics))
     _write_json(run_dir / "judgements.json", judgements)
+
+    # Initial system/user prompt per phase occurrence, one entry per recorded
+    # turn. Best-effort: a logging failure must never invalidate a completed run.
+    try:
+        prompt_recorder.write(
+            run_dir,
+            environment_name=env.__class__.__name__,
+            seed=int(seed),
+        )
+    except Exception:
+        logger.warning("Failed to write agent_initial_prompts.* for %s", run_id)
 
     # 7. COST ACCOUNTING (best-effort; requires optional config.pricing)
     pricing = _get_token_pricing_usd_per_1m(
