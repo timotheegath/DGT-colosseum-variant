@@ -66,6 +66,19 @@ _CUSTOM_PROVIDER_ALIASES = ("custom_oai_compatible",)
 # The legacy hyphenated spelling, kept only so we can detect and reject it loudly.
 _HYPHENATED_CUSTOM_PROVIDER = "custom-oai-compatible"
 
+# Client-error statuses that mean "this endpoint will not serve a streaming
+# request" rather than "this request was malformed". Only these trigger the
+# fallback to the blocking transport; 429 and 5xx stay retryable.
+_STREAM_REJECT_STATUSES = {400, 404, 405, 422, 501}
+
+
+class _StreamingUnsupported(RuntimeError):
+    """Raised when an endpoint rejects a streaming request outright.
+
+    Signals the caller to retry without ``stream_options`` and then fall back
+    to the blocking transport, instead of treating it as a hard failure.
+    """
+
 
 def normalize_provider_name(provider: Any) -> str:
     """Normalize (and validate) a provider string.
@@ -89,7 +102,28 @@ def normalize_provider_name(provider: Any) -> str:
 
 
 class CustomOAICompatibleClient(AbstractClient):
-    """Client that talks to any OpenAI-compatible chat-completions endpoint."""
+    """Client that talks to any OpenAI-compatible chat-completions endpoint.
+
+    Supports two transports, selected by the ``stream`` flag:
+
+    * ``stream=True`` (default) consumes the server-sent-events body and
+      rebuilds an OpenAI-shaped response dict.
+    * ``stream=False`` reads the JSON body directly.
+
+    Streaming is the default because of how reasoning models behave. GLM-5.3-
+    Flash can spend 60-90s inside a single completion, and with a blocking
+    request the client receives **zero** bytes until the whole generation is
+    finished. That makes the HTTP read timeout silently act as a cap on
+    *total generation time* rather than on network inactivity, so healthy
+    requests fail with ``ReadTimeout`` purely because the model was still
+    thinking. Measured against the Modal-hosted endpoint: the same prompt
+    took 62.9s blocking (timed out at 60s) but streamed with a 2.06s
+    time-to-first-byte. With SSE the read timeout only fires when the
+    connection is genuinely stalled.
+
+    The blocking path is kept as a fallback for endpoints that reject a
+    streaming request outright (see :class:`_StreamingUnsupported`).
+    """
 
     def __init__(
         self,
@@ -97,6 +131,8 @@ class CustomOAICompatibleClient(AbstractClient):
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         request_timeout: int = 180,
+        stream: bool = True,
+        include_usage: bool = True,
     ):
         load_dotenv(override=True)
         resolved_base_url = base_url or os.getenv("OAI_COMPATIBLE_BASE_URL")
@@ -110,6 +146,8 @@ class CustomOAICompatibleClient(AbstractClient):
         self.base_url = str(resolved_base_url).rstrip("/")
         self.api_key = resolved_key
         self.request_timeout = int(request_timeout)
+        self.stream = bool(stream)
+        self.include_usage = bool(include_usage)
         self.session = requests.Session()
 
     @staticmethod
@@ -174,11 +212,11 @@ class CustomOAICompatibleClient(AbstractClient):
             "Content-Type": "application/json",
         }
 
-    def generate_response(
+    def _build_payload(
         self,
         input: List[Dict[str, Any]],
         params: Dict[str, Any],
-    ) -> Tuple[Dict[str, Any], str]:
+    ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": params.get("model"),
             "messages": input,
@@ -196,30 +234,182 @@ class CustomOAICompatibleClient(AbstractClient):
         if converted_tools:
             payload["tools"] = converted_tools
 
+        return payload
+
+    @staticmethod
+    def _parse_blocking(
+        response: requests.Response,
+    ) -> Tuple[Dict[str, Any], str]:
+        """Read a non-streamed JSON body and return ``(response, response_str)``."""
+        data = response.json()
+        choices = data.get("choices") or []
+        first_message = (choices[0].get("message") if choices else None) or {
+            "content": ""
+        }
+        response_str = CustomOAICompatibleClient._extract_message_content(first_message)
+        return data, response_str
+
+    @staticmethod
+    def _consume_stream(
+        response: requests.Response,
+    ) -> Tuple[Dict[str, Any], str]:
+        """Consume an SSE body and rebuild an OpenAI-shaped response dict.
+
+        The SSE dialect used by OpenAI-compatible servers sends exactly one
+        JSON payload per ``data:`` line, terminated by ``data: [DONE]``. Tool
+        calls arrive as deltas: ``id`` and ``function.name`` are sent once
+        (in the first delta for that index) and ``function.arguments`` is sent
+        as JSON fragments that must be concatenated in order.
+
+        The rebuilt dict mirrors the blocking response closely enough for
+        terrarium: ``choices[0].message`` carries ``content``,
+        ``reasoning_content`` and ``tool_calls``, and ``usage`` is carried
+        over verbatim when the server supplies it.
+        """
+        content_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        tool_calls: Dict[int, Dict[str, Any]] = {}
+        finish_reason: Optional[str] = None
+        usage: Optional[Dict[str, Any]] = None
+        model: Optional[str] = None
+        response_id: Optional[str] = None
+        created: Optional[int] = None
+
+        for raw in response.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            line = raw.strip()
+            if not line.startswith("data:"):
+                continue
+            body = line[len("data:") :].strip()
+            if not body:
+                continue
+            if body == "[DONE]":
+                break
+            try:
+                chunk = json.loads(body)
+            except json.JSONDecodeError:
+                # A malformed frame must not abort the whole response; the
+                # server may interleave keep-alive noise.
+                continue
+            if not isinstance(chunk, dict):
+                continue
+
+            model = chunk.get("model") or model
+            response_id = chunk.get("id") or response_id
+            created = chunk.get("created") or created
+            # The usage frame is a chunk with an empty `choices` list.
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+
+            for choice in chunk.get("choices") or []:
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    content_parts.append(delta["content"])
+                if delta.get("reasoning_content"):
+                    reasoning_parts.append(delta["reasoning_content"])
+                for call in delta.get("tool_calls") or []:
+                    index = call.get("index")
+                    if index is None:
+                        index = 0
+                    slot = tool_calls.setdefault(
+                        index,
+                        {
+                            "id": None,
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        },
+                    )
+                    if call.get("id"):
+                        slot["id"] = call["id"]
+                    if call.get("type"):
+                        slot["type"] = call["type"]
+                    function = call.get("function") or {}
+                    name = function.get("name")
+                    # The name arrives once; later deltas carry only arguments.
+                    if name and not slot["function"]["name"]:
+                        slot["function"]["name"] = name
+                    arguments = function.get("arguments")
+                    if arguments:
+                        slot["function"]["arguments"] += arguments
+
+        message: Dict[str, Any] = {
+            "role": "assistant",
+            "content": "".join(content_parts),
+        }
+        if reasoning_parts:
+            message["reasoning_content"] = "".join(reasoning_parts)
+        if tool_calls:
+            message["tool_calls"] = [tool_calls[key] for key in sorted(tool_calls)]
+
+        data: Dict[str, Any] = {
+            "id": response_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": finish_reason,
+                }
+            ],
+        }
+        if usage:
+            data["usage"] = usage
+        return data, message["content"]
+
+    def _request(
+        self,
+        payload: Dict[str, Any],
+        *,
+        stream: bool,
+    ) -> Tuple[Dict[str, Any], str]:
+        """POST ``payload`` with the retry/backoff policy.
+
+        Returns ``(response_dict, response_str)``. Raises
+        :class:`_StreamingUnsupported` when a streaming request is rejected
+        outright by the endpoint (a client error), so the caller can fall back
+        to the blocking transport.
+        """
         max_retries, base_sleep_s, max_sleep_s = self._get_retry_config()
         retryable_statuses = {429, 500, 502, 503, 504}
         last_error: Optional[str] = None
-        response: Optional[requests.Response] = None
 
         for attempt in range(max_retries + 1):
+            response: Optional[requests.Response] = None
+            can_retry = True
             try:
                 response = self.session.post(
                     f"{self.base_url}/chat/completions",
                     headers=self._build_headers(),
                     data=json.dumps(payload),
                     timeout=self.request_timeout,
+                    stream=stream,
                 )
             except requests.exceptions.RequestException as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
-                response = None
             else:
                 if response.ok:
-                    last_error = None
-                    break
-                last_error = f"HTTP {response.status_code}: {response.text}"
+                    try:
+                        if stream:
+                            return self._consume_stream(response)
+                        return self._parse_blocking(response)
+                    except Exception as exc:
+                        # A broken stream (connection dropped mid-body) or a
+                        # malformed body is worth one more attempt.
+                        last_error = f"{type(exc).__name__}: {exc}"
+                else:
+                    body = response.text
+                    if stream and response.status_code in _STREAM_REJECT_STATUSES:
+                        raise _StreamingUnsupported(
+                            f"HTTP {response.status_code}: {body}"
+                        ) from None
+                    last_error = f"HTTP {response.status_code}: {body}"
+                    can_retry = response.status_code in retryable_statuses
 
-            status_code = response.status_code if response is not None else None
-            can_retry = (status_code in retryable_statuses) or (response is None)
             if attempt >= max_retries or not can_retry:
                 break
 
@@ -236,16 +426,42 @@ class CustomOAICompatibleClient(AbstractClient):
                 sleep_s = min(max_sleep_s, exp_sleep + jitter)
             time.sleep(sleep_s)
 
-        if last_error is not None:
-            raise RuntimeError(
-                f"custom-oai-compatible chat request failed after {max_retries + 1} attempts: {last_error}"
-            )
+        raise RuntimeError(
+            f"custom-oai-compatible chat request failed after {max_retries + 1} attempts: {last_error}"
+        )
 
-        data = response.json()  # type: ignore[union-attr]
-        choices = data.get("choices") or []
-        first_message = choices[0]["message"] if choices else {"content": ""}
-        response_str = self._extract_message_content(first_message)
-        return data, response_str
+    def generate_response(
+        self,
+        input: List[Dict[str, Any]],
+        params: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], str]:
+        payload = self._build_payload(input, params)
+
+        if not self.stream:
+            return self._request(payload, stream=False)
+
+        streaming_payload = dict(payload)
+        streaming_payload["stream"] = True
+        if self.include_usage:
+            streaming_payload["stream_options"] = {"include_usage": True}
+
+        try:
+            return self._request(streaming_payload, stream=True)
+        except _StreamingUnsupported:
+            # The endpoint rejected the streaming request. Retry without
+            # `stream_options` (some servers support SSE but not usage
+            # frames) before giving up on streaming entirely.
+            pass
+
+        fallback_payload = dict(payload)
+        fallback_payload["stream"] = True
+        try:
+            return self._request(fallback_payload, stream=True)
+        except _StreamingUnsupported:
+            pass
+
+        # Last resort: the original blocking transport.
+        return self._request(payload, stream=False)
 
     async def process_tool_calls(
         self,
@@ -316,7 +532,15 @@ def _install_client_and_model_patch(terrarium: Any, _tu: Any) -> None:
             return CustomOAICompatibleClient(
                 base_url=coai_cfg.get("base_url"),
                 api_key=coai_cfg.get("api_key"),
+                # 180s, not 60s: reasoning models can legitimately spend 60-90s
+                # inside one completion. The blocking transport's read timeout
+                # caps TOTAL generation time, so 60s turned healthy requests
+                # into ReadTimeouts.
                 request_timeout=int(coai_cfg.get("request_timeout", 180)),
+                # SSE by default so the read timeout measures inter-chunk idle
+                # time instead of total generation time.
+                stream=bool(coai_cfg.get("stream", True)),
+                include_usage=bool(coai_cfg.get("include_usage", True)),
             )
         return _orig_get_client(
             llm_config, agent_name=agent_name, vllm_runtime=vllm_runtime
