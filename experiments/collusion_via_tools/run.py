@@ -839,6 +839,12 @@ async def _run_single(
     logger.info("RUN START %s", run_id)
     cfg.setdefault("simulation", {})["run_timestamp"] = f"{run_timestamp}__{run_id}"
 
+    # --- PROMPT CAPTURE SETUP ---
+    # Created here (before the env/agents exist) so the recorder's output files
+    # exist for the whole run and can be streamed to as turns complete. One
+    # recorder per run; concurrent runs never share state.
+    prompt_recorder = ThreadSafePromptRecorder(run_dir)
+
     # --- COMPONENT INITIALIZATION ---
     protocol = LocalCommunicationProtocol(config=cfg)
     env_cls = _resolve_environment_class(cfg.get("environment") or {})
@@ -915,8 +921,6 @@ async def _run_single(
         vllm_runtime = build_vllm_runtime(cfg["llm"])
 
     adversary_spec = AdversarySpec(adversary_names=set(adversaries))
-    # One recorder per run; multiple concurrent runs each own their own instance.
-    prompt_recorder = ThreadSafePromptRecorder()
 
     agents = []
     for name in agent_names:
@@ -1359,16 +1363,14 @@ async def _run_single(
     _write_json(run_dir / "metrics.json", asdict(metrics))
     _write_json(run_dir / "judgements.json", judgements)
 
-    # Initial system/user prompt per phase occurrence, one entry per recorded
-    # turn. Best-effort: a logging failure must never invalidate a completed run.
+    # Initial system/user prompt per phase occurrence. These are streamed to
+    # disk as turns complete (see prompt_capture.py); this call only guarantees
+    # the files exist for runs that captured nothing. Best-effort: a logging
+    # failure must never invalidate a completed run.
     try:
-        prompt_recorder.write(
-            run_dir,
-            environment_name=env.__class__.__name__,
-            seed=int(seed),
-        )
+        prompt_recorder.flush()
     except Exception:
-        logger.warning("Failed to write agent_initial_prompts.* for %s", run_id)
+        logger.warning("Failed to flush agent_initial_prompts.* for %s", run_id)
 
     # 7. COST ACCOUNTING (best-effort; requires optional config.pricing)
     pricing = _get_token_pricing_usd_per_1m(

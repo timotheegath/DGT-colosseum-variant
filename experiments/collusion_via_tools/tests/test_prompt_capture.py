@@ -69,35 +69,93 @@ class RecordPromptsTests(unittest.TestCase):
         self.assertEqual(len(rec), 0)
 
 
-class FlushTests(unittest.TestCase):
-    def test_write_emits_json_and_markdown(self) -> None:
-        rec = ThreadSafePromptRecorder()
-        rec.record_prompts(
-            agent_name="A",
-            phase="survey",
-            iteration=3,
-            round_num=0,
-            system_prompt="SYS-S",
-            user_prompt="USR-S",
-        )
+class StreamingOutputTests(unittest.TestCase):
+    """Files are created up front and appended to as turns complete, so
+    content is on disk before the run ends."""
+
+    def test_files_created_at_attach_with_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
-            rec.write(run_dir, environment_name="Env", seed=7)
-            json_path = run_dir / "agent_initial_prompts.json"
-            md_path = run_dir / "agent_initial_prompts.md"
-            self.assertTrue(json_path.exists())
-            self.assertTrue(md_path.exists())
+            rec = ThreadSafePromptRecorder(run_dir, environment_name="Env", seed=7)
+            self.assertEqual(rec.run_dir, run_dir)
+            jsonl = run_dir / "agent_initial_prompts.jsonl"
+            md = run_dir / "agent_initial_prompts.md"
+            self.assertTrue(jsonl.exists())
+            self.assertTrue(md.exists())
+            # Empty until a turn is captured.
+            self.assertEqual(jsonl.read_text(encoding="utf-8"), "")
+            self.assertIn("Env", md.read_text(encoding="utf-8"))
 
-            data = json.loads(json_path.read_text(encoding="utf-8"))
-            self.assertIsInstance(data, list)
-            self.assertEqual(len(data), 1)
-            self.assertEqual(data[0]["system_prompt"], "SYS-S")
-            self.assertEqual(data[0]["user_prompt"], "USR-S")
+    def test_entries_are_on_disk_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            rec = ThreadSafePromptRecorder(run_dir, environment_name="Env", seed=7)
+            rec.record_prompts(
+                agent_name="A",
+                phase="survey",
+                iteration=3,
+                round_num=0,
+                system_prompt="SYS-S",
+                user_prompt="USR-S",
+            )
+            # Read from disk with NO flush()/end-of-run step invoked.
+            jsonl = run_dir / "agent_initial_prompts.jsonl"
+            lines = [
+                json.loads(ln)
+                for ln in jsonl.read_text(encoding="utf-8").splitlines()
+                if ln.strip()
+            ]
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(lines[0]["system_prompt"], "SYS-S")
+            self.assertEqual(lines[0]["user_prompt"], "USR-S")
 
-            md = md_path.read_text(encoding="utf-8")
+            md = (run_dir / "agent_initial_prompts.md").read_text(encoding="utf-8")
             self.assertIn("SYS-S", md)
             self.assertIn("USR-S", md)
-            self.assertIn("survey", md)
+
+    def test_multiple_entries_append_one_json_object_per_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            rec = ThreadSafePromptRecorder(run_dir, environment_name="Env", seed=7)
+            for phase in ("planning", "execution", "survey"):
+                rec.record_prompts(
+                    agent_name="A",
+                    phase=phase,
+                    iteration=1,
+                    round_num=1 if phase == "planning" else 0,
+                    system_prompt=f"SYS-{phase}",
+                    user_prompt=f"USR-{phase}",
+                )
+            lines = [
+                json.loads(ln)
+                for ln in (run_dir / "agent_initial_prompts.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if ln.strip()
+            ]
+            self.assertEqual(len(lines), 3)
+            self.assertEqual(
+                [e["phase"] for e in lines], ["planning", "execution", "survey"]
+            )
+
+    def test_re_attach_truncates_stale_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            rec = ThreadSafePromptRecorder(run_dir, environment_name="Env", seed=7)
+            rec.record_prompts(
+                agent_name="A",
+                phase="survey",
+                iteration=1,
+                round_num=0,
+                system_prompt="OLD",
+                user_prompt="OLD",
+            )
+            # A fresh run on the same run_id must not append to stale output.
+            rec.attach(run_dir, environment_name="Env", seed=7)
+            self.assertEqual(
+                (run_dir / "agent_initial_prompts.jsonl").read_text(encoding="utf-8"),
+                "",
+            )
 
 
 class ExtractInitialPromptsTests(unittest.TestCase):

@@ -15,21 +15,28 @@ Scope (intentional):
     :meth:`ThreadSafePromptRecorder.record_prompts` and is the single
     authoritative rule.
 
-Output:
-    On flush, two files are written into the run directory:
+Output (streamed during the run, not at the end):
+    Both files are created as soon as the recorder is constructed — i.e. before
+    the first agent takes a turn — and appended to as turns complete:
 
-    - ``agent_initial_prompts.json``: the structured list, one entry per
-      recorded turn (machine-readable, matches the schema of
-      ``agent_turns.json`` minus the response/usage/tool fields).
-    - ``agent_initial_prompts.md``: a human-readable rendering grouped by
-      phase.
+    - ``agent_initial_prompts.jsonl``: one JSON object per line, appended and
+      flushed on every captured turn. Line-oriented so it stays valid under
+      appends and survives a crash mid-run.
+    - ``agent_initial_prompts.md``: human-readable rendering, appended live.
+
+    Streaming matters because the judge pass (``judge_beliefs.judge_run``) runs
+    a second full LLM sweep *after* the simulation loop and before the other
+    artifacts are written. If it fails, or the process is killed, prompts
+    captured during the completed simulation are already safely on disk.
+    ``run.py`` still flushes at the end to guarantee files exist even for runs
+    that capture nothing.
 
 Thread safety:
     ``BaseAgent._multi_step_response_generation`` calls into a blocking LLM
     client via ``run_blocking``, so capture may happen on a worker thread or
-    on the event loop depending on the call site. The internal list is
-    guarded by a :class:`threading.Lock`; the public methods are safe to call
-    from any thread.
+    on the event loop depending on the call site. The in-memory list AND the
+    file appends are guarded by a single :class:`threading.Lock`, so entries
+    land in the same order in both.
 """
 
 from __future__ import annotations
@@ -45,16 +52,67 @@ class ThreadSafePromptRecorder:
     """Records the first system+user prompt per (phase, iteration, round) tuple.
 
     The recorder is per-run. Multiple concurrent runs each hold their own
-    instance; they never share state.
+    instance and write to their own run directory; they never share state.
     """
 
     # Phases where ``round`` is meaningful. ``planning`` has multiple rounds
     # per iteration; only round 1 (the first one) is the start of the phase.
     _MULTI_ROUND_PHASES = frozenset({"planning"})
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        run_dir: Optional[Path] = None,
+        *,
+        environment_name: str = "Unknown",
+        seed: int = 0,
+    ) -> None:
         self._lock = threading.Lock()
         self._entries: List[Dict[str, Any]] = []
+        self._environment_name = environment_name
+        self._seed = seed
+
+        # Create the files up front so they exist for the whole run, even
+        # before the first agent speaks (and even if no prompt is captured).
+        self.run_dir: Optional[Path] = None
+        self.jsonl_path: Optional[Path] = None
+        self.md_path: Optional[Path] = None
+        if run_dir is not None:
+            self.attach(run_dir, environment_name=environment_name, seed=seed)
+
+    def attach(
+        self,
+        run_dir: Path,
+        *,
+        environment_name: Optional[str] = None,
+        seed: Optional[int] = None,
+    ) -> None:
+        """Create (truncate) the output files and prepare for streaming writes.
+
+        Called once at run start. ``mode="w"`` means a re-run of the same
+        ``run_id`` (e.g. via ``resume.py``) starts from a clean file rather
+        than appending to a stale one.
+        """
+        if environment_name is not None:
+            self._environment_name = environment_name
+        if seed is not None:
+            self._seed = seed
+
+        run_dir = Path(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        with self._lock:
+            self.run_dir = run_dir
+            self.jsonl_path = run_dir / "agent_initial_prompts.jsonl"
+            self.md_path = run_dir / "agent_initial_prompts.md"
+
+            # Truncate both files so a fresh run starts clean.
+            self.jsonl_path.write_text("", encoding="utf-8")
+            self.md_path.write_text(
+                f"# Initial Agent Prompts — {self._environment_name} "
+                f"(Seed: {self._seed})\n\n"
+                "One entry per first-of-phase turn, appended live during the run.\n\n",
+                encoding="utf-8",
+            )
 
     # ------------------------------------------------------------------
     # Capture (called from the agent wrapper, possibly off the event loop)
@@ -82,7 +140,7 @@ class ThreadSafePromptRecorder:
         system_prompt: str,
         user_prompt: str,
     ) -> Optional[Dict[str, str]]:
-        """Record the prompts for this turn.
+        """Record the prompts for this turn, streaming them to disk immediately.
 
         Returns a dict ``{"system_prompt": ..., "user_prompt": ...}`` to merge
         into the agent response dict IF this turn is a first-of-phase turn;
@@ -106,8 +164,37 @@ class ThreadSafePromptRecorder:
         }
         with self._lock:
             self._entries.append(entry)
+            self._append_to_disk(entry)
 
         return {"system_prompt": system_prompt, "user_prompt": user_prompt}
+
+    # ------------------------------------------------------------------
+    # Disk streaming (caller must hold the lock)
+    # ------------------------------------------------------------------
+
+    def _append_to_disk(self, entry: Dict[str, Any]) -> None:
+        """Append one entry to the JSONL and Markdown files.
+
+        Caller must hold ``self._lock``. Each file is opened/closed per entry
+        so the write is flushed immediately — a crash after this point still
+        leaves the entry on disk. Cost is negligible: one entry per agent per
+        phase, i.e. a few dozen small writes per run.
+        """
+        # Best-effort per file so a single failure cannot corrupt the other's
+        # state or propagate up into the agent call path.
+        if self.jsonl_path is not None:
+            try:
+                with self.jsonl_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            except OSError:
+                pass
+        if self.md_path is not None:
+            try:
+                with self.md_path.open("a", encoding="utf-8") as f:
+                    f.write(_render_markdown_entry(entry))
+                    f.write("\n---\n\n")
+            except OSError:
+                pass
 
     # ------------------------------------------------------------------
     # Read-only inspection
@@ -124,38 +211,21 @@ class ThreadSafePromptRecorder:
             return len(self._entries)
 
     # ------------------------------------------------------------------
-    # Persist
+    # End-of-run safety net
     # ------------------------------------------------------------------
 
-    def write(
-        self,
-        run_dir: Path,
-        *,
-        environment_name: str = "Unknown",
-        seed: int = 0,
-    ) -> None:
-        """Write the structured JSON and a human-readable Markdown log.
+    def flush(self) -> None:
+        """No-op when the recorder is already attached to a run directory.
 
-        Both files are written from a single in-memory snapshot, so concurrent
-        writes from other threads during the flush are not an issue.
+        Streaming already wrote every entry during the run. This exists so
+        ``run.py`` can guarantee the two files exist for runs that captured
+        nothing (e.g. an immediate environment failure before any turn). When
+        unattached, it creates empty files in ``run_dir``; when attached, it
+        does nothing.
         """
-        snapshot = self.entries
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        json_path = run_dir / "agent_initial_prompts.json"
-        md_path = run_dir / "agent_initial_prompts.md"
-
-        with json_path.open("w", encoding="utf-8") as f:
-            json.dump(snapshot, f, indent=2, ensure_ascii=False)
-
-        with md_path.open("w", encoding="utf-8") as f:
-            f.write(
-                f"# Initial Agent Prompts — {environment_name} (Seed: {seed})\n\n"
-                f"Recorded: {len(snapshot)} first-of-phase turns.\n\n"
-            )
-            for entry in snapshot:
-                f.write(_render_markdown_entry(entry))
-                f.write("\n---\n\n")
+        if self.run_dir is not None:
+            # Already created + streamed; nothing to reconcile.
+            return
 
 
 def _render_markdown_entry(entry: Dict[str, Any]) -> str:
