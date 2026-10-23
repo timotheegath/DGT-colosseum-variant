@@ -1053,6 +1053,7 @@ async def _run_single(
                 env,
                 iteration=0,
                 planning_round=0,
+                phase="pre_coordination",
             )
             turns.append(
                 {

@@ -374,12 +374,21 @@ class LocalCommunicationProtocol(BaseCommunicationProtocol):
         environment: Any,
         iteration: int,
         planning_round: int,
+        phase: str = "planning",
     ) -> Dict[str, Any]:
+        """Run one planning-shaped turn for ``agent``.
+
+        ``phase`` labels the turn for the trajectory/tool logs and defaults to
+        ``"planning"`` so ordinary iteration planning rounds are unaffected.
+        Callers that reuse the planning prompt for another round (e.g. the
+        adversary pre-coordination round) pass a distinct phase so it is not
+        conflated with a normal planning round.
+        """
         self.environment = environment
         self.current_planning_round = planning_round
         blackboard_contexts = await self._prefetch_blackboard_events(
             agent_name,
-            phase="planning",
+            phase=phase,
             iteration=iteration,
         )
         prompts = environment.prompts
@@ -389,7 +398,7 @@ class LocalCommunicationProtocol(BaseCommunicationProtocol):
             blackboard_context=blackboard_contexts,
             communication_protocol=self,
             prompts=prompts,
-            phase="planning",
+            phase=phase,
             iteration=iteration,
             round_num=planning_round,
         )

@@ -799,5 +799,186 @@ class BlackboardPostMessageRewriteTests(unittest.TestCase):
         self.assertEqual(len(proto.megaboard.get(1, "A", limit=None)), 0)
 
 
+class _PhaseRecordingAgent:
+    """Fake agent mirroring the parts of ``BaseAgent`` that
+    ``agent_planning_turn`` drives: ``generate_response`` forwards ``phase``
+    to ``set_meta_context``, which is exactly what the trajectory logger keys
+    the ``agent_trajectories.json`` entry on.
+    """
+
+    def __init__(self) -> None:
+        self.generate_response_calls = []
+        self.meta = {}
+
+    def set_meta_context(self, *, agent_name, phase, iteration, round_num=None):
+        self.meta = {
+            "agent_name": agent_name,
+            "phase": phase,
+            "iteration": iteration,
+            "round_num": round_num,
+        }
+
+    async def generate_response(
+        self,
+        *,
+        agent_name,
+        agent_context,
+        blackboard_context,
+        communication_protocol,
+        prompts,
+        phase,
+        iteration,
+        round_num=0,
+    ):
+        self.generate_response_calls.append(
+            {"phase": phase, "iteration": iteration, "round_num": round_num}
+        )
+        # Mirrors ``BaseAgent.generate_response`` -> ``set_meta_context``.
+        self.set_meta_context(
+            agent_name=agent_name,
+            phase=phase,
+            iteration=iteration,
+            round_num=round_num,
+        )
+        return {"response": "ok", "usage": {}, "tools_executed": 0}
+
+
+class _StubEnvironment:
+    """Only ``prompts`` is read by ``agent_planning_turn``."""
+
+    prompts = object()
+
+
+class PlanningTurnPhaseLabelTests(unittest.TestCase):
+    """The pre-coordination turn must be labelled ``pre_coordination`` in the
+    trajectory log, not conflated with a normal iteration-0 ``planning`` round.
+    """
+
+    def _proto(self):
+        from experiments.common.local_protocol import LocalCommunicationProtocol
+
+        return LocalCommunicationProtocol(config={})
+
+    def test_defaults_to_planning_phase(self) -> None:
+        proto = self._proto()
+        agent = _PhaseRecordingAgent()
+        asyncio.run(
+            proto.agent_planning_turn(
+                agent,
+                "AgentA",
+                {"agent_name": "AgentA"},
+                _StubEnvironment(),
+                iteration=0,
+                planning_round=0,
+            )
+        )
+        self.assertEqual(agent.generate_response_calls[0]["phase"], "planning")
+        self.assertEqual(agent.meta["phase"], "planning")
+        self.assertEqual(agent.meta["iteration"], 0)
+        self.assertEqual(agent.meta["round_num"], 0)
+
+    def test_explicit_phase_is_forwarded(self) -> None:
+        proto = self._proto()
+        agent = _PhaseRecordingAgent()
+        asyncio.run(
+            proto.agent_planning_turn(
+                agent,
+                "AgentA",
+                {"agent_name": "AgentA"},
+                _StubEnvironment(),
+                iteration=0,
+                planning_round=0,
+                phase="pre_coordination",
+            )
+        )
+        self.assertEqual(agent.generate_response_calls[0]["phase"], "pre_coordination")
+        self.assertEqual(agent.meta["phase"], "pre_coordination")
+        # Same iteration/round shape the trajectory logger nests under.
+        self.assertEqual(agent.meta["iteration"], 0)
+        self.assertEqual(agent.meta["round_num"], 0)
+
+    def test_normal_planning_caller_unchanged(self) -> None:
+        # A caller that omits ``phase`` (the normal planning loop) keeps
+        # logging as ``planning`` for non-zero iterations too.
+        proto = self._proto()
+        agent = _PhaseRecordingAgent()
+        asyncio.run(
+            proto.agent_planning_turn(
+                agent,
+                "AgentA",
+                {"agent_name": "AgentA"},
+                _StubEnvironment(),
+                iteration=3,
+                planning_round=2,
+            )
+        )
+        self.assertEqual(agent.generate_response_calls[0]["phase"], "planning")
+        self.assertEqual(agent.meta["iteration"], 3)
+        self.assertEqual(agent.meta["round_num"], 2)
+
+
+class PostMessageAvailableDuringPreCoordination(unittest.TestCase):
+    """The pre-coordination round is labelled ``pre_coordination`` in the
+    trajectory log, but it is planning-shaped for *toolset* purposes: the
+    patched ``ToolsetDiscovery.get_tools_for_blackboard`` must still offer
+    ``post_message`` so the adversary can write to the secret blackboard.
+    Terrarium's stock gate keys on ``phase == "planning"`` exactly, which would
+    silently drop ``post_message`` for ``"pre_coordination"``.
+    """
+
+    def _discovery(self):
+        from terrarium.toolset_discovery import ToolsetDiscovery
+
+        # The wrapper never reads ``self``; a plain instance mirrors the real
+        # call shape and keeps the test hermetic.
+        return ToolsetDiscovery()
+
+    @staticmethod
+    def _tool_names(tools) -> set:
+        return {str((t or {}).get("function", {}).get("name")) for t in tools}
+
+    def test_pre_coordination_offers_post_message(self) -> None:
+        from experiments.common._patch_terrarium import set_post_message_disabled
+
+        set_post_message_disabled(False)
+        try:
+            tools = self._discovery().get_tools_for_blackboard("pre_coordination")
+        finally:
+            set_post_message_disabled(False)
+        self.assertIn("post_message", self._tool_names(tools))
+
+    def test_planning_offers_post_message(self) -> None:
+        from experiments.common._patch_terrarium import set_post_message_disabled
+
+        set_post_message_disabled(False)
+        try:
+            tools = self._discovery().get_tools_for_blackboard("planning")
+        finally:
+            set_post_message_disabled(False)
+        self.assertIn("post_message", self._tool_names(tools))
+
+    def test_execution_offers_no_blackboard_tools(self) -> None:
+        from experiments.common._patch_terrarium import set_post_message_disabled
+
+        set_post_message_disabled(False)
+        try:
+            tools = self._discovery().get_tools_for_blackboard("execution")
+        finally:
+            set_post_message_disabled(False)
+        self.assertEqual(tools, [])
+
+    def test_disabled_suppresses_even_pre_coordination(self) -> None:
+        from experiments.common._patch_terrarium import set_post_message_disabled
+
+        set_post_message_disabled(True)
+        try:
+            precoord = self._discovery().get_tools_for_blackboard("pre_coordination")
+            planning = self._discovery().get_tools_for_blackboard("planning")
+        finally:
+            set_post_message_disabled(False)
+        self.assertEqual(precoord, [])
+        self.assertEqual(planning, [])
+
+
 if __name__ == "__main__":
     unittest.main()
