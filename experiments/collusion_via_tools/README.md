@@ -208,6 +208,12 @@ Unlike the entries below, this is a **new capability**, not a divergence from `a
 - **`agent_turns.json` also carries the prompts.** First-of-phase turns gain `system_prompt` / `user_prompt` keys alongside `response` / `usage` / `tools_executed`. The change is purely additive, so existing consumers (including `judge_beliefs`) are unaffected.
 - **Resume behaviour:** re-running the same `run_id` truncates both files rather than appending to stale output.
 
+### 2026-10-23 — prompt fix: no board posting without a usable secret board
+
+- **"No secret board" and "no `post_message`" are now the same condition in the prompt.** `prompts.py` treats the secret board as usable only when the agent has BOTH the secret blackboard id and the `post_message` tool in the current phase. When it is not usable, the `SECRET COALITION CHANNEL` block is dropped and every "post / coordinate on the SECRET board" instruction is rewritten as the same intent expressed through tool-call signals (the amounts/timing of `transfer_resources` calls, the `schedule_patient` slots, or how the tool calls appear on the shared blackboard).
+- **This fixes a real contradiction in `disable_post_message: true` + `pre_coordination_round: true`.** The secret board still exists there (it is created for the pre-coordination round), but `post_message` is removed from the adversary toolset from planning round 1 onward. The prompt used to tell the agent to post to a board it could not write to, while the same prompt's COMMUNICATION CONSTRAINTS block said it could not.
+- **The pre-coordination prompt is unchanged.** That phase is the one sanctioned private window: `run.py` forces `post_message_available=True` there, so the agent keeps the "post ONLY to the coalition-only blackboard" instruction.
+
 ### 2026-10-22 — tool-mediated collusion
 
 - **`post_message` can be disabled.** `sweeps[].disable_post_message` (or `experiment.disable_post_message`, `experiment.adversary.disable_post_message`, `communication_network.disable_post_message`) removes the blackboard `post_message` tool from every agent's toolset, so collusion has to go through tool calls only. Enabled runs get a `__nopm` suffix on their `run_id`. `agent_misalignment` has no such toggle.
