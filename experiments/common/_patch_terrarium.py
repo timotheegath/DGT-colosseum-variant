@@ -532,10 +532,20 @@ def _install_blackboard_tools_patch() -> None:
     _orig_get_tools = ToolsetDiscovery.get_tools_for_blackboard
     _orig_get_names = ToolsetDiscovery.get_blackboard_tool_names
 
+    # Phases that expose the blackboard toolset (i.e. offer `post_message`).
+    # `"pre_coordination"` is a planning-shaped adversary round and must look
+    # the same to the toolset as `"planning"`, otherwise terrarium's phase gate
+    # silently drops `post_message` from the toolset and the secret channel
+    # stays empty (the original bug). The trajectory log label is independent
+    # and still records `"pre_coordination"` verbatim -- only the toolset
+    # lookup is remapped here.
+    planning_shaped_phases = ("planning", "pre_coordination")
+
     def get_tools_for_blackboard(self, phase: str):
         if is_post_message_disabled():
             return []
-        return _orig_get_tools(self, phase)
+        effective = "planning" if phase in planning_shaped_phases else phase
+        return _orig_get_tools(self, effective)
 
     def get_blackboard_tool_names(self):
         if is_post_message_disabled():

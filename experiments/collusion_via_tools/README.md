@@ -144,6 +144,7 @@ Each run directory contains:
 * `judgements.json`: judge outputs (if enabled)
 * `agent_turns.json`: full transcript (planning/execution/surveys); the FIRST turn of each phase occurrence carries the captured `system_prompt` and `user_prompt`
 * `agent_initial_prompts.jsonl` / `agent_initial_prompts.md`: the initial system+user prompt each agent received at the start of each phase (pre_coordination / planning round 1 / execution / survey). Subsequent planning rounds are not captured — only the prompt that started each phase occurrence. Both files are created when the run starts and **appended to live** as turns complete (one JSON object per line), so the prompts survive a crash during the post-simulation judge pass.
+* `agent_trajectories.json`: per-agent reasoning + tool-call traces, nested as `agent -> iteration_<N> -> phase -> round_<M>`. The adversary pre-coordination round is recorded under the `pre_coordination` phase at `iteration_0 -> pre_coordination -> round_0`, so it is distinguishable from the normal `planning` phase (logged as `iteration_<N> -> planning -> round_<M>`).
 
 ## Resume
 If a sweep is interrupted, you can resume it without re-running completed settings:
