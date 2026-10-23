@@ -96,7 +96,7 @@ class CustomOAICompatibleClient(AbstractClient):
         *,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
-        request_timeout: int = 60,
+        request_timeout: int = 180,
     ):
         load_dotenv(override=True)
         resolved_base_url = base_url or os.getenv("OAI_COMPATIBLE_BASE_URL")
@@ -316,7 +316,7 @@ def _install_client_and_model_patch(terrarium: Any, _tu: Any) -> None:
             return CustomOAICompatibleClient(
                 base_url=coai_cfg.get("base_url"),
                 api_key=coai_cfg.get("api_key"),
-                request_timeout=int(coai_cfg.get("request_timeout", 60)),
+                request_timeout=int(coai_cfg.get("request_timeout", 180)),
             )
         return _orig_get_client(
             llm_config, agent_name=agent_name, vllm_runtime=vllm_runtime
