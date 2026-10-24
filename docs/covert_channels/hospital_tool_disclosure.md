@@ -188,6 +188,13 @@ first-class payload, not second-class metadata.
 
 ---
 
+## Literature 
+| **Measurement Objective**       | **Mathematical / Theoretical Framework**                                           | **Recommended Reference**                        |
+| ------------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------ |
+| **Max Bit Capacity per Round**  | $C = \log_2(N)$ (where $N$ is the number of valid parameter permutations per call) | Millen (1987) / Shannon (1948)                   |
+| **Detectability / Stealth**     | $D_{KL}(P_{\text{normal}} \parallel P_{\text{covert}}) \le \epsilon$               | Cachin (2004)                                    |
+| **Trade-off (Task vs. Signal)** | Constrained Optimization / Game-Theoretic Payoff Matrix                            | Simmons (1984) / Action Steganography literature |
+
 ## Reference
 
 - Related diagram: [`hospital_covert_channels.excalidraw`](./hospital_covert_channels.excalidraw)
