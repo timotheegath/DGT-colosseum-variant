@@ -426,5 +426,105 @@ class SurveyPhaseRemapTests(unittest.TestCase):
         self.assertEqual(agent_context["phase"], "survey")
 
 
+class SystemPromptForwardingTests(unittest.TestCase):
+    """Regression: Terrarium hands extra kwargs to the wrapper.
+
+    Terrarium resolves the system prompt by inspecting the *wrapper's*
+    signature (``terrarium/agents/base.py``). Because
+    ``ProvisionerBlackboardPrompts.get_system_prompt`` declares ``**kwargs``,
+    Terrarium calls it with ``agent_name``/``agent_context``/
+    ``blackboard_context``. The wrapped upstream prompt
+    (``HospitalPrompts.get_system_prompt(self)``) accepts none of them, so
+    forwarding blindly raised
+    ``TypeError: HospitalPrompts.get_system_prompt() got an unexpected keyword
+    argument 'agent_name'`` on EVERY agent turn of a benign run (the wrapper is
+    the top-level prompt stack when misalignment is disabled).
+    """
+
+    @staticmethod
+    def _terrarium_style_call(prompts, agent_name="General_Hospital_Triage"):
+        """Replicate terrarium's prompt-resolution call exactly."""
+        import inspect
+
+        get_system_prompt = prompts.get_system_prompt
+        sig = inspect.signature(get_system_prompt)
+        if sig is None or not sig.parameters:
+            return get_system_prompt()
+        kwargs = {}
+        for name, param in sig.parameters.items():
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                kwargs = {
+                    "agent_name": agent_name,
+                    "agent_context": {},
+                    "blackboard_context": {},
+                }
+                break
+            if name == "agent_name":
+                kwargs[name] = agent_name
+            elif name == "agent_context":
+                kwargs[name] = {}
+            elif name == "blackboard_context":
+                kwargs[name] = {}
+        return get_system_prompt(**kwargs)
+
+    def test_terrarium_style_call_on_real_hospital_prompts(self) -> None:
+        from envs.dcops.hospital.hospital_prompts import HospitalPrompts
+
+        wrapped = ProvisionerBlackboardPrompts(HospitalPrompts.__new__(HospitalPrompts))
+        system_prompt = self._terrarium_style_call(wrapped)
+        self.assertIn("You are a Hospital Agent", system_prompt)
+
+    def test_terrarium_style_call_on_fake_base_prompts(self) -> None:
+        wrapped = ProvisionerBlackboardPrompts(_FakeBasePrompts())
+        self.assertEqual(self._terrarium_style_call(wrapped), "SYSTEM")
+
+    def test_direct_kwargs_call_does_not_raise(self) -> None:
+        from envs.dcops.hospital.hospital_prompts import HospitalPrompts
+
+        wrapped = ProvisionerBlackboardPrompts(HospitalPrompts.__new__(HospitalPrompts))
+        system_prompt = wrapped.get_system_prompt(
+            agent_name="General_Hospital_Triage",
+            agent_context={},
+            blackboard_context={},
+        )
+        self.assertIn("You are a Hospital Agent", system_prompt)
+
+    def test_base_prompt_receiving_agent_name_still_gets_it(self) -> None:
+        """Filtering must not swallow kwargs the wrapped prompt does accept."""
+
+        class _AgentNameBase:
+            def get_system_prompt(self, agent_name: str) -> str:
+                return f"SYSTEM:{agent_name}"
+
+        wrapped = ProvisionerBlackboardPrompts(_AgentNameBase())
+        self.assertEqual(
+            self._terrarium_style_call(wrapped, agent_name="Resource_Provisioner"),
+            "SYSTEM:Resource_Provisioner",
+        )
+
+    def test_base_prompt_with_var_keyword_receives_everything(self) -> None:
+        class _VarKwBase:
+            def get_system_prompt(self, **kwargs) -> str:
+                return ",".join(sorted(kwargs))
+
+        wrapped = ProvisionerBlackboardPrompts(_VarKwBase())
+        self.assertEqual(
+            self._terrarium_style_call(wrapped),
+            "agent_context,agent_name,blackboard_context",
+        )
+
+    def test_misalignment_stack_system_prompt_still_resolves(self) -> None:
+        """The non-benign stack (MisalignmentPrompts on top) must keep working."""
+        import types
+
+        from envs.dcops.hospital.hospital_prompts import HospitalPrompts
+
+        wrapped = ProvisionerBlackboardPrompts(HospitalPrompts.__new__(HospitalPrompts))
+        prompts = MisalignmentPrompts(types.SimpleNamespace(), {}, base_prompts=wrapped)
+        system_prompt = self._terrarium_style_call(prompts)
+        self.assertIn("MISALIGNMENT MODE SWITCH", system_prompt)
+        self.assertIn("You are a Hospital Agent", system_prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

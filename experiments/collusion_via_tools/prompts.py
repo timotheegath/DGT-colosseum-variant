@@ -1,8 +1,68 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import inspect
+from typing import Any, Dict, Optional, Tuple
 
 from envs.abstract_environment import AbstractEnvironment
+
+
+def _call_prompt_fn(
+    fn: Any,
+    args: Tuple[Any, ...] = (),
+    kwargs: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """Call ``fn`` with only the arguments it actually accepts.
+
+    Terrarium decides what to pass to ``get_system_prompt`` by inspecting the
+    *wrapper's* signature (``terrarium/agents/base.py``): a wrapper that
+    declares ``**kwargs`` is handed ``agent_name``/``agent_context``/
+    ``blackboard_context``. The wrapped upstream prompt may accept none of
+    them -- ``HospitalPrompts.get_system_prompt(self)`` takes none -- so
+    forwarding them blindly raises
+    ``TypeError: HospitalPrompts.get_system_prompt() got an unexpected keyword
+    argument 'agent_name'`` on every agent turn.
+
+    Filter the call against the callee's own signature instead: parameters it
+    declares are passed, the rest are dropped. A callee that declares
+    ``**kwargs`` still receives everything.
+    """
+    call_kwargs = dict(kwargs or {})
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return fn(*args, **call_kwargs)
+
+    positional_queue = list(args)
+    call_args: list = []
+    final_kwargs: Dict[str, Any] = {}
+
+    for name, param in sig.parameters.items():
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            # Every remaining positional argument lands here.
+            call_args.extend(positional_queue)
+            positional_queue = []
+            continue
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            # Handled below: the leftover kwargs go to the callee verbatim.
+            continue
+        if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+            # POSITIONAL_ONLY parameters cannot be passed by keyword.
+            if name in call_kwargs:
+                call_args.append(call_kwargs.pop(name))
+            elif positional_queue:
+                call_args.append(positional_queue.pop(0))
+            continue
+        # POSITIONAL_OR_KEYWORD / KEYWORD_ONLY.
+        if positional_queue and param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
+            call_args.append(positional_queue.pop(0))
+            continue
+        if name in call_kwargs:
+            final_kwargs[name] = call_kwargs.pop(name)
+
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        final_kwargs.update(call_kwargs)
+
+    return fn(*call_args, **final_kwargs)
 
 
 class MisalignmentPrompts:
@@ -522,6 +582,13 @@ class ProvisionerBlackboardPrompts:
     remapped to ``planning`` (that would inject the logistics "send transfers"
     block and invite tool calls instead of a JSON answer), and ``execution`` is
     left untouched (the provisioner has no execution-phase work).
+
+    ``get_system_prompt`` is a pure pass-through to the wrapped prompt stack.
+    Terrarium resolves the system prompt by inspecting the *wrapper's*
+    signature and, because the wrapper declares ``**kwargs``, calls it with
+    ``agent_name``/``agent_context``/``blackboard_context``. The wrapped
+    upstream prompt may accept none of them, so the call is filtered against
+    the callee's signature instead of forwarded blindly.
     """
 
     def __init__(self, base_prompts: Optional[Any] = None):
@@ -530,7 +597,11 @@ class ProvisionerBlackboardPrompts:
     def get_system_prompt(self, *args: Any, **kwargs: Any) -> str:
         if self.base_prompts is None:
             return ""
-        return self.base_prompts.get_system_prompt(*args, **kwargs)
+        # Terrarium inspects THIS signature and, because of the ``**kwargs``,
+        # calls with ``agent_name``/``agent_context``/``blackboard_context``.
+        # The wrapped upstream prompt (``HospitalPrompts.get_system_prompt``)
+        # takes none of them, so forward only what it accepts.
+        return _call_prompt_fn(self.base_prompts.get_system_prompt, args, kwargs)
 
     def get_user_prompt(
         self,
