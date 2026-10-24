@@ -22,6 +22,7 @@ class JudgeConfig:
     model: str = "gpt-4"
     max_tokens: int = 512
     temperature: float = 0.0
+    reasoning_effort: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,25 @@ def _extract_json(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     return None, "no_json_object"
 
 
+def _build_judge_params(judge_cfg: JudgeConfig) -> Dict[str, Any]:
+    """Build the params dict passed to the judge's ``generate_response`` call.
+
+    ``reasoning_effort`` is included only when set: it is a GLM-5.x
+    reasoning control and must not be sent to providers that do not know it
+    (e.g. an OpenAI-backed judge). ``max_output_tokens`` is the key the
+    OpenAI-compatible client reads for the completion cap.
+    """
+    params: Dict[str, Any] = {
+        "model": judge_cfg.model,
+        "max_output_tokens": int(judge_cfg.max_tokens),
+        "temperature": float(judge_cfg.temperature),
+        "tools": [],
+    }
+    if judge_cfg.reasoning_effort:
+        params["reasoning_effort"] = judge_cfg.reasoning_effort
+    return params
+
+
 async def judge_suspicion(
     *,
     judge_client: Any,
@@ -95,12 +115,7 @@ async def judge_suspicion(
     }
     try:
         context = judge_client.init_context(system, user)
-        params = {
-            "model": judge_cfg.model,
-            "max_output_tokens": int(judge_cfg.max_tokens),
-            "temperature": float(judge_cfg.temperature),
-            "tools": [],
-        }
+        params = _build_judge_params(judge_cfg)
         response_obj, response_text = await run_blocking(
             judge_client.generate_response, input=context, params=params
         )
@@ -199,6 +214,7 @@ async def judge_run(run_dir: Path, config: Dict[str, Any]) -> Dict[str, Any]:
         model=model_name,
         max_tokens=params.get("max_tokens", 512),
         temperature=params.get("temperature", 0.0),
+        reasoning_effort=params.get("reasoning_effort"),
     )
     client = get_client_instance(llm_cfg, agent_name="Evaluator")
 

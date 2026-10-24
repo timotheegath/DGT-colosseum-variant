@@ -59,6 +59,8 @@ from dotenv import load_dotenv
 from llm_server.clients.abstract_client import AbstractClient
 from llm_server.clients.fireworks_client import _convert_tools
 
+logger = logging.getLogger(__name__)
+
 # ``custom_oai_compatible`` (snake_case) is the only accepted spelling. The tuple
 # form is kept for call-site readability, but it now holds exactly one canonical
 # entry; the hyphenated spelling is rejected by ``normalize_provider_name`` below.
@@ -102,6 +104,241 @@ def normalize_provider_name(provider: Any) -> str:
     return normalized
 
 
+# How many trailing characters of a truncated ``function.arguments`` string we
+# are willing to walk backwards looking for a cut point that yields valid JSON.
+# Bounded so a pathological multi-megabyte argument blob cannot turn repair into
+# an O(n^2) scan.
+_JSON_REPAIR_WINDOW = 500
+
+
+def _close_truncated_json(prefix: str) -> Optional[str]:
+    """Close any unterminated string/brackets in ``prefix`` (best effort).
+
+    Returns ``prefix`` with a closing quote (if we ended inside a string) and
+    the missing closing brackets appended in reverse order, or ``None`` when the
+    text contains a structural error that no amount of closing can fix (an
+    unbalanced closing bracket, or a bracket that does not match its opener).
+
+    This never invents data: it only terminates what is already open.
+    """
+    stack: List[str] = []
+    in_string = False
+    escaped = False
+    for ch in prefix:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            stack.append("{")
+        elif ch == "[":
+            stack.append("[")
+        elif ch in "}]":
+            if not stack:
+                return None
+            opener = stack.pop()
+            if (opener == "{" and ch != "}") or (opener == "[" and ch != "]"):
+                return None
+
+    out = prefix
+    if in_string:
+        # A trailing backslash escapes the closing quote we are about to add,
+        # so double it first to keep the string terminating.
+        if escaped:
+            out += "\\"
+        out += '"'
+    for opener in reversed(stack):
+        out += "}" if opener == "{" else "]"
+    return out
+
+
+def _repair_truncated_json(text: str) -> Optional[str]:
+    """Best-effort repair of a JSON object string that was cut off mid-token.
+
+    Returns a string that ``json.loads`` accepts, or ``None`` when the input
+    cannot be repaired.
+    """
+    if not isinstance(text, str):
+        return None
+
+    try:
+        json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    else:
+        # Already valid: hand it back untouched.
+        return text
+
+    stripped = text.lstrip()
+    if not stripped or stripped[0] not in "{[":
+        # Only object/array literals are worth trying to close; a bare scalar or
+        # arbitrary prose cannot be repaired without inventing structure.
+        return None
+
+    # Walk cut points from the end of the text backwards, bounded to the tail.
+    start_cut = max(1, len(text) - _JSON_REPAIR_WINDOW)
+    for cut in range(len(text), start_cut - 1, -1):
+        repaired = _close_truncated_json(text[:cut])
+        if repaired is None:
+            continue
+        try:
+            json.loads(repaired)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        return repaired
+    return None
+
+
+def _arguments_would_generate_note(args: Any) -> bool:
+    """Whether an arguments value is one :func:`_sanitize_tool_call_arguments`
+    rewrites (and therefore attaches a note to).
+
+    Kept as the single predicate shared by the sanitizer and
+    :meth:`CustomOAICompatibleClient.process_tool_calls` so the two cannot drift.
+    """
+    if args is None:
+        return True
+    if isinstance(args, dict):
+        return False
+    if isinstance(args, str):
+        try:
+            json.loads(args)
+        except (json.JSONDecodeError, ValueError):
+            return True
+        return False
+    return True
+
+
+def _sanitize_tool_call_arguments(
+    message: Dict[str, Any],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Return ``(sanitized_message, notes)`` for one assistant message.
+
+    Every ``tool_calls[*].function.arguments`` in the returned message is
+    guaranteed to be a string that ``json.loads`` accepts. The input is never
+    mutated: the returned message is a copy with a new ``tool_calls`` list and a
+    new ``function`` dict per call. No keys are added to the message (the
+    message is echoed back to the API on the next request, and unknown fields
+    can trigger 400s); ``reasoning_content`` is preserved as-is.
+    """
+    sanitized: Dict[str, Any] = dict(message)
+    notes: List[Dict[str, Any]] = []
+
+    raw_calls = message.get("tool_calls")
+    if not raw_calls:
+        return sanitized, notes
+
+    new_calls: List[Dict[str, Any]] = []
+    for call in raw_calls:
+        new_call: Dict[str, Any] = dict(call)
+        function_block = dict(call.get("function") or {})
+        tool_name = function_block.get("name") or "unknown_tool"
+        args = function_block.get("arguments")
+
+        if isinstance(args, dict):
+            function_block["arguments"] = json.dumps(args)
+        elif args is None:
+            function_block["arguments"] = "{}"
+            notes.append({"tool": tool_name, "status": "missing_arguments", "raw": ""})
+        elif isinstance(args, str):
+            try:
+                json.loads(args)
+            except (json.JSONDecodeError, ValueError):
+                repaired = _repair_truncated_json(args)
+                if repaired is not None:
+                    function_block["arguments"] = repaired
+                    notes.append(
+                        {"tool": tool_name, "status": "repaired", "raw": args[:2000]}
+                    )
+                else:
+                    function_block["arguments"] = "{}"
+                    notes.append(
+                        {"tool": tool_name, "status": "dropped", "raw": args[:2000]}
+                    )
+            # A string that already parses is kept verbatim.
+        else:
+            function_block["arguments"] = "{}"
+            notes.append(
+                {"tool": tool_name, "status": "dropped", "raw": repr(args)[:2000]}
+            )
+
+        new_call["function"] = function_block
+        new_calls.append(new_call)
+
+    sanitized["tool_calls"] = new_calls
+    return sanitized, notes
+
+
+def _is_request_body_validation_error(status_code: int, body: str) -> bool:
+    """Whether an HTTP error is the endpoint rejecting the request *body*.
+
+    These are deterministic (the same body will always fail), so they must not
+    be retried or misread as "this endpoint does not support streaming".
+    """
+    if status_code != 400:
+        return False
+    return "must be valid JSON" in body or "invalid_request_error" in body
+
+
+def _build_reasoning_controls(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the reasoning-control keys to add to a chat-completions payload.
+
+    Only two controls are meaningful for GLM-5.x templates:
+
+    * ``reasoning_effort`` -- ``low`` / ``high`` shorten or deepen the trace;
+      any other value is mapped by the GLM-5.3 chat template to ``max``.
+    * ``chat_template_kwargs.clear_thinking`` -- when true, prior-turn
+      ``reasoning_content`` is not re-injected into the prompt.
+
+    Returns a dict with only the keys that should be sent. Never mutates
+    ``params``.
+    """
+    controls: Dict[str, Any] = {}
+
+    reasoning_effort = params.get("reasoning_effort")
+    if isinstance(reasoning_effort, str):
+        if reasoning_effort:
+            if reasoning_effort not in ("low", "high"):
+                logger.warning(
+                    "reasoning_effort=%r is not one GLM-5.3 honors (expected "
+                    "'low' or 'high'); the GLM-5.3 chat template will treat it "
+                    "as 'max'. Passing it through verbatim in case the endpoint "
+                    "is a different model whose template accepts it.",
+                    reasoning_effort,
+                )
+            controls["reasoning_effort"] = reasoning_effort
+    elif reasoning_effort is not None:
+        logger.warning(
+            "ignoring non-string reasoning_effort=%r: expected a string such "
+            "as 'low' or 'high'",
+            reasoning_effort,
+        )
+
+    chat_template_kwargs = params.get("chat_template_kwargs")
+    if isinstance(chat_template_kwargs, dict):
+        recognized = ("reasoning_effort", "clear_thinking")
+        if any(key in chat_template_kwargs for key in recognized):
+            resolved = dict(chat_template_kwargs)
+            if "clear_thinking" in resolved:
+                resolved["clear_thinking"] = bool(resolved["clear_thinking"])
+            controls["chat_template_kwargs"] = resolved
+        else:
+            logger.warning(
+                "ignoring chat_template_kwargs=%r: none of its keys are "
+                "recognized by GLM-5.x templates (only 'reasoning_effort' and "
+                "'clear_thinking' are read)",
+                chat_template_kwargs,
+            )
+
+    return controls
+
+
 class CustomOAICompatibleClient(AbstractClient):
     """Client that talks to any OpenAI-compatible chat-completions endpoint.
 
@@ -134,6 +371,7 @@ class CustomOAICompatibleClient(AbstractClient):
         request_timeout: int = 180,
         stream: bool = True,
         include_usage: bool = True,
+        strip_reasoning_content: bool = False,
     ):
         load_dotenv(override=True)
         resolved_base_url = base_url or os.getenv("OAI_COMPATIBLE_BASE_URL")
@@ -149,6 +387,11 @@ class CustomOAICompatibleClient(AbstractClient):
         self.request_timeout = int(request_timeout)
         self.stream = bool(stream)
         self.include_usage = bool(include_usage)
+        # When true, the reasoning_content echoed back by a prior assistant turn
+        # is stripped from the sanitized copy appended to the conversation
+        # history (see process_tool_calls), so it is not re-injected into the
+        # next prompt. The message returned to the caller keeps it.
+        self.strip_reasoning_content = bool(strip_reasoning_content)
         self.session = requests.Session()
 
     @staticmethod
@@ -223,8 +466,15 @@ class CustomOAICompatibleClient(AbstractClient):
             "messages": input,
         }
 
-        max_tokens = params.get("max_completion_tokens") or params.get(
-            "max_output_tokens"
+        # Accept every spelling the cap travels under: terrarium's agent path
+        # supplies all three (`_build_generation_params`), the judge supplies
+        # `max_output_tokens`, and a raw provider params block carries plain
+        # `max_tokens`. Dropping the cap silently lets the model reason
+        # unbounded, which is how a run ends up with a 30k-token trace.
+        max_tokens = (
+            params.get("max_completion_tokens")
+            or params.get("max_output_tokens")
+            or params.get("max_tokens")
         )
         if max_tokens:
             payload["max_tokens"] = max_tokens
@@ -234,6 +484,11 @@ class CustomOAICompatibleClient(AbstractClient):
         converted_tools = _convert_tools(params.get("tools"))
         if converted_tools:
             payload["tools"] = converted_tools
+
+        # Reasoning controls (GLM-5.x): never overwrite anything set explicitly
+        # above.
+        for key, value in _build_reasoning_controls(params).items():
+            payload.setdefault(key, value)
 
         return payload
 
@@ -378,8 +633,10 @@ class CustomOAICompatibleClient(AbstractClient):
         max_retries, base_sleep_s, max_sleep_s = self._get_retry_config()
         retryable_statuses = {429, 500, 502, 503, 504}
         last_error: Optional[str] = None
+        attempts_made = 0
 
         for attempt in range(max_retries + 1):
+            attempts_made += 1
             response: Optional[requests.Response] = None
             can_retry = True
             try:
@@ -404,6 +661,15 @@ class CustomOAICompatibleClient(AbstractClient):
                         last_error = f"{type(exc).__name__}: {exc}"
                 else:
                     body = response.text
+                    if _is_request_body_validation_error(response.status_code, body):
+                        # A deterministic body-validation error. Retrying (or
+                        # re-issuing over another transport) cannot help, and
+                        # misclassifying it as _StreamingUnsupported would
+                        # trigger two extra round-trips. Fail fast instead.
+                        raise RuntimeError(
+                            f"HTTP {response.status_code}: {body} "
+                            "(server rejected the request body; not retried)"
+                        ) from None
                     if stream and response.status_code in _STREAM_REJECT_STATUSES:
                         raise _StreamingUnsupported(
                             f"HTTP {response.status_code}: {body}"
@@ -428,7 +694,7 @@ class CustomOAICompatibleClient(AbstractClient):
             time.sleep(sleep_s)
 
         raise RuntimeError(
-            f"custom-oai-compatible chat request failed after {max_retries + 1} attempts: {last_error}"
+            f"custom-oai-compatible chat request failed after {attempts_made} attempts: {last_error}"
         )
 
     def generate_response(
@@ -475,20 +741,87 @@ class CustomOAICompatibleClient(AbstractClient):
             return 0, context, []
 
         message = choices[0].get("message") or {}
-        context.append(message)
-        tool_calls = message.get("tool_calls") or []
+        # Sanitize BEFORE the message enters the history: the conversation is
+        # re-POSTed verbatim on the next step, and a truncated
+        # ``function.arguments`` string makes the server reject the whole
+        # request with "Assistant tool call function.arguments must be valid
+        # JSON" (HTTP 400).
+        sanitized, notes = _sanitize_tool_call_arguments(message)
+        if getattr(self, "strip_reasoning_content", False):
+            # Do not re-inject the prior turn's chain-of-thought into the next
+            # prompt. `message` (returned to the caller / used for logging) is
+            # left untouched; only the copy appended to the history is stripped.
+            sanitized.pop("reasoning_content", None)
+        context.append(sanitized)
+
+        finish_reason = choices[0].get("finish_reason")
+        truncated = finish_reason == "length"
+
+        original_calls = message.get("tool_calls") or []
+        sanitized_calls = sanitized.get("tool_calls") or []
+        # ``notes`` holds one entry per rewritten call, in call order. Pair each
+        # note with its call using the same predicate the sanitizer used, so a
+        # clean call never steals a later call's note.
+        notes_iter = iter(notes)
+
         tool_calls_executed = 0
         step_tools: List[str] = []
 
-        for call in tool_calls:
+        for original_call, call in zip(original_calls, sanitized_calls):
             function_block = call.get("function") or {}
-            tool_name = function_block.get("name", "unknown_tool")
-            arguments_raw = function_block.get("arguments") or "{}"
+            tool_name = function_block.get("name") or "unknown_tool"
+            arguments_raw = function_block.get("arguments")
             try:
                 arguments = json.loads(arguments_raw)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, ValueError):
                 arguments = {}
-            step_tools.append(f"{tool_name} -- {json.dumps(arguments)}")
+
+            original_fn = original_call.get("function") or {}
+            note = None
+            if _arguments_would_generate_note(original_fn.get("arguments")):
+                note = next(notes_iter, None)
+            status = note.get("status") if note else None
+            raw = note.get("raw") if note else ""
+
+            marker = ""
+            if status == "repaired":
+                marker = f" [ARGS_REPAIRED_FROM_TRUNCATION raw={raw[:300]!r}]"
+            elif status == "dropped":
+                marker = f" [ARGS_DROPPED_TRUNCATED raw={raw[:300]!r}]"
+            step_tools.append(f"{tool_name} -- {json.dumps(arguments)}{marker}")
+
+            if truncated and status in ("repaired", "dropped"):
+                logger.warning(
+                    "tool call arguments were truncated by the model "
+                    "(finish_reason=%r) for tool %r; arguments %s",
+                    finish_reason,
+                    tool_name,
+                    "repaired from the partial JSON"
+                    if status == "repaired"
+                    else "dropped (could not be repaired)",
+                )
+
+            if status == "dropped":
+                # Do not execute, but keep the assistant/tool pairing valid: the
+                # API requires a tool message for every tool_call_id.
+                context.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id"),
+                        "name": tool_name,
+                        "content": json.dumps(
+                            {
+                                "status": "error",
+                                "result": (
+                                    "tool call dropped: the model's arguments "
+                                    "were truncated and could not be repaired"
+                                ),
+                            }
+                        ),
+                    }
+                )
+                continue
+
             result = await execute_tool_callback(tool_name, arguments)
             context.append(
                 {
@@ -543,6 +876,9 @@ def _install_client_and_model_patch(terrarium: Any, _tu: Any) -> None:
                 # time instead of total generation time.
                 stream=bool(coai_cfg.get("stream", True)),
                 include_usage=bool(coai_cfg.get("include_usage", True)),
+                strip_reasoning_content=bool(
+                    coai_cfg.get("strip_reasoning_content", False)
+                ),
             )
         return _orig_get_client(
             llm_config, agent_name=agent_name, vllm_runtime=vllm_runtime

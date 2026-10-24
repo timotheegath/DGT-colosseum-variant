@@ -99,11 +99,22 @@ judge_llm:
     # NOT enough for this reasoning model: measured wall time for a single
     # chat completion on the longest coalition prompts was 34s-91s, so a 60s
     # ceiling timed out requests that the server was still working on.
-    # The judge itself is cheap (max_tokens: 512) but shares this client.
+    # The judge's output is small but its reasoning trace is not, so it shares
+    # this client's generous timeout.
     request_timeout: 180
     params:
-      max_tokens: 512
+      # 2026-10-25: the judge previously ran with a 512-token cap. 40 of 438
+      # judge calls (9.1%) across 60 completed runs hit exactly 512 -- the
+      # reasoning trace consumed the whole budget and the judge returned an
+      # empty response, so that agent's belief went unjudged. The cap is now
+      # 2048.
+      max_tokens: 2048
       temperature: 0.0
+      # GLM-5.3 honours only `low` and `high` for `reasoning_effort`; any other
+      # value (e.g. `medium`) is silently mapped to `max` by the chat template,
+      # which is the default and therefore a no-op. `high` is set here (the
+      # faithful middle setting for the requested "medium" effort).
+      reasoning_effort: high
 
 simulation:
   seed: 42 # Overridden by experiment seeds
@@ -142,8 +153,26 @@ llm_models:
         # time, not network inactivity.
         request_timeout: 180
         params:
-          # 4096 truncated this reasoning model mid-trace on the longest
-          # coalition prompts (the provisioner returned empty content and no
-          # tool calls), leaving the adversary silent for a whole round.
-          max_tokens: 8192
+          # 2026-10-24 incident: a max_tokens cap of 8192 truncated
+          # GLM-5.3-Flash mid-tool-call during long `post_message` /
+          # `broadcast_message` arguments. The cut-off `function.arguments`
+          # string was persisted verbatim in the conversation history, so the
+          # follow-up request was rejected with HTTP 400 "Assistant tool call
+          # function.arguments must be valid JSON". (8192 had itself been raised
+          # from 4096 because 4096 truncated the reasoning trace and left the
+          # provisioner with empty content and no tool calls.) The endpoint
+          # reports max_output_length 1048576 for zai-org/GLM-5.3-Flash, so
+          # 32768 is safely within budget.
+          max_tokens: 32768
           temperature: 0.7
+          # Reasoning-control levers (GLM-5.3 chat template). GLM-5.3 honours
+          # only `low` and `high` for `reasoning_effort`; any other value
+          # (e.g. `medium`) is silently mapped to `max` by the chat template,
+          # which is the default and therefore a no-op. `high` is the middle
+          # setting (the faithful encoding of the requested "medium" effort;
+          # thinking can never be disabled on GLM-5.3). `clear_thinking` is
+          # available below but left off: it reduces prompt tokens without
+          # shortening the reasoning trace.
+          reasoning_effort: high
+          # chat_template_kwargs:
+          #   clear_thinking: true
