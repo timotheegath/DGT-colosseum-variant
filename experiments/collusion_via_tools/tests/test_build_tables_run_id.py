@@ -123,6 +123,41 @@ class RunIdParsingTests(unittest.TestCase):
         self.assertFalse(fields.get("pre_coordination_round"))
 
 
+class CountedPrecoordRunIdTests(unittest.TestCase):
+    """The round count is now encoded in `run_id` as `__precoord<N>`."""
+
+    def test_counted_suffix_sets_round_count(self) -> None:
+        for n in (1, 2, 5):
+            with self.subTest(n=n):
+                fields = _infer(BASE.format(role="Patient", suffix=f"__precoord{n}"))
+                self.assertTrue(fields.get("pre_coordination_round"))
+                self.assertEqual(fields.get("pre_coordination_rounds"), n)
+                self.assertEqual(fields.get("pre_coordination_rounds_effective"), n)
+
+    def test_legacy_count_less_defaults_to_one(self) -> None:
+        fields = _infer(BASE.format(role="Patient", suffix="__precoord"))
+        self.assertTrue(fields.get("pre_coordination_round"))
+        self.assertEqual(fields.get("pre_coordination_rounds"), 1)
+
+    def test_nopm_counted_suffix(self) -> None:
+        fields = _infer(BASE.format(role="Patient", suffix="__nopm__precoord2"))
+        self.assertTrue(fields.get("disable_post_message"))
+        self.assertTrue(fields.get("post_message_restricted"))
+        self.assertTrue(fields.get("pre_coordination_round"))
+        self.assertEqual(fields.get("pre_coordination_rounds"), 2)
+
+    def test_run_config_wins_over_run_id_count(self) -> None:
+        fields = _infer_cfg(
+            BASE.format(role="Patient", suffix="__precoord2"),
+            {
+                "pre_coordination_round": True,
+                "pre_coordination_rounds": 5,
+                "pre_coordination_rounds_effective": 5,
+            },
+        )
+        self.assertEqual(fields.get("pre_coordination_rounds"), 5)
+
+
 class TreatmentMetadataTests(unittest.TestCase):
     def test_configured_and_effective_counts_from_run_config(self) -> None:
         rid = BASE.format(role="Patient", suffix="__precoord")

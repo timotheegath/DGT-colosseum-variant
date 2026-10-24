@@ -91,24 +91,38 @@ secret blackboard exists**; posts are routed to it. If there is no secret board,
 there is no private channel and the tool must not be called — a public board is
 never a fallback.
 
-The number of rounds is `simulation.pre_coordination_rounds` (integer `>= 1`,
-default `1`). It is a **global** setting, not a sweep axis: every run in the
-sweep uses the same value. Each round gives every adversary one turn, in the
-same agent order as the normal planning loop, and honest agents are skipped
-entirely. When a secret board exists, later rounds see the coalition messages
-written in earlier rounds, so a coalition can refine its scheme across the
-phase:
+The number of rounds is `pre_coordination_rounds` — a **sweep axis** on
+`sweeps[].pre_coordination_rounds` (a list of ints, or a single int). Every run
+in the sweep may therefore use a different count, so a single sweep can compare
+e.g. one vs two coordination rounds:
 
 ```yaml
-simulation:
-  pre_coordination_rounds: 2   # default 1; global, not swept
+experiment:
+  sweeps:
+    - name: initial_coordination_sweep
+      pre_coordination_round: true
+      pre_coordination_rounds: [1, 2]   # one run per count (run_id __precoord1 / __precoord2)
 ```
+
+`simulation.pre_coordination_rounds` (integer `>= 1`, default `1`) remains the
+**global fallback**: it is used for every sweep that does not declare the axis.
+When the sweep key is present it wins, whatever its value, and the global key is
+ignored for that sweep. The axis collapses to a **single value** when
+`pre_coordination_round` is `false`: the count is inert there, and expanding it
+would produce two runs with the same `run_id` (a directory collision).
+
+Each round gives every adversary one turn, in the same agent order as the normal
+planning loop, and honest agents are skipped entirely. When a secret board
+exists, later rounds see the coalition messages written in earlier rounds, so a
+coalition can refine its scheme across the phase.
 
 `pre_coordination_max_messages` is a per-agent `post_message` cap, applied
 **per round**: counters reset at the start of every pre-coordination round.
 Omit it (or set `null`/`0`) for unlimited messages. Invalid
-`pre_coordination_rounds` values (booleans, non-integers, `< 1`) raise a
-`ValueError` when the config is loaded, before any runs are scheduled.
+`pre_coordination_rounds` values (booleans, non-integers, `< 1`, empty lists)
+raise a `ValueError` when the config is loaded — for both the global fallback
+and every sweep-level value — before any runs are scheduled or the output root
+is created.
 
 Rounds are recorded 1-based in `agent_turns.json` (`pre_coordination_round` /
 `pre_coordination_rounds`, plus the shared `round` field) and in
@@ -116,23 +130,26 @@ Rounds are recorded 1-based in `agent_turns.json` (`pre_coordination_round` /
 Every round's initial prompt is captured (each has a different current/total
 round line), and a blackboard snapshot is written after every completed round.
 
-`run_config.json` records both the configured count
+`run_config.json` records both the resolved per-run count
 (`pre_coordination_rounds`) and the effective count actually executed
 (`pre_coordination_rounds_effective`; `0` when the phase is disabled or the run
 is benign). Both are also flattened into `summary.json` / `summary.csv`.
 
-`run_id` stays stable — the count is not part of it. `resume.py` therefore
-compares the treatment metadata in an existing `run_config.json` against the
-expected count: a completed run whose phase actually executed with a different
-count is treated as incomplete and rerun instead of being accepted. Legacy run
-configs with the phase enabled but no recorded count are treated as having
-executed `1` round. Disabled/benign runs have effective `0`, so a global count
+The `run_id` now encodes the count as `__precoord<N>` (e.g. `__precoord2`, or
+`__nopm__precoord2` combined with the post-message suffix); the phase-off case
+has no pre-coordination suffix at all. Because the count is always encoded, two
+different counts in one sweep get distinct run_ids. The **legacy count-less
+`__precoord` form** (from directories produced before this change) is still
+recognised by `resume.py` as a fallback candidate; no canonical id equals it, so
+such a directory can never be the target of a rerun for a different treatment.
+`resume.py` additionally compares the treatment metadata in an existing
+`run_config.json` against the expected count: a completed legacy run whose phase
+actually executed with a different count is treated as incomplete and rerun.
+Legacy run configs with the phase enabled but no recorded count are treated as
+having executed `1` round. Disabled/benign runs have effective `0`, so a count
 change alone does not rerun them.
 A rerun resets `agent_trajectories.json` so stale pre-coordination rounds from
-an earlier attempt are not merged into the new run. Since the count is global
-and absent from `run_id`, compare different counts across separate output roots
-(or rerun in place with the new value); a run with a different count in the same
-root is overwritten, not added alongside.
+an earlier attempt are not merged into the new run.
 
 ## Restricting `post_message` (tool-based collusion)
 
@@ -223,6 +240,16 @@ The intentional behavioral differences are tracked in [Changelog](#changelog) be
 ## Changelog
 
 How this experiment now differs from `experiments/agent_misalignment/`, the folder it was forked from.
+
+### 2026-10-24 — pre-coordination round count is a sweep axis
+
+- **`sweeps[].pre_coordination_rounds` is now a sweep axis** (a list of ints, or a single int). Each value must be an integer `>= 1`, validated with the same strictness as the global knob (bools, floats, strings, values `< 1` and empty lists raise `ValueError`). A single sweep can therefore compare e.g. `[1, 2]` coordination rounds.
+- **`simulation.pre_coordination_rounds` is now only the global fallback** for sweeps that do not declare the axis (default `1`). When the sweep key is present it wins and the global value is ignored for that sweep. The shipped `configs/collusion_via_tools_1.yaml` no longer sets the global key; the active benign sweep declares `pre_coordination_rounds: [1]` (inert: its phase is off) and the commented `initial_coordination_sweep` documents `[1, 2]`.
+- **The axis collapses to one value when `pre_coordination_round` is false.** The count is inert there, and expanding it would produce two runs with the same `run_id` (a directory collision). The scheduler, `resume.py` and the `total_runs` pre-count all apply the same collapse, so `progress.json` matches the number of runs actually planned.
+- **`run_id` now encodes the count: `__precoord<N>`** (e.g. `__precoord1`, `__nopm__precoord2`). Phase-off runs still carry no pre-coordination suffix. Two different counts inside one sweep now produce distinct run_ids; the count is no longer absent from `run_id`.
+- **Legacy directories stay resumable.** `resume.py` adds the count-less `__precoord` id as a fallback candidate when the phase is on. No canonical id equals it, so a legacy directory can never be the target of a rerun for a different treatment; `_run_matches_spec` still decides on the recorded effective round count. `plots/build_tables.py`'s `_RUN_ID_RE_V2` parses both the legacy count-less form and the counted form, and falls back to the run_id-derived count when `run_config.json` omits `pre_coordination_rounds`.
+- **Fail-fast validation.** Invalid global AND sweep-level counts abort the run (and `resume`) before the output root is created.
+- **Impact on existing results.** No prompt, sampling parameter or token budget changed. `run_id` changed shape for pre-coordination runs only (a suffix was added), and `run_config.json`'s `pre_coordination_rounds` is now the resolved per-run value rather than the global one; every other artifact format is unchanged.
 
 ### 2026-10-23 — LLM read timeouts on the long coalition prompts
 

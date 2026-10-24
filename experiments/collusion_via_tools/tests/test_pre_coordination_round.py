@@ -1,24 +1,28 @@
 """Tests for the `pre_coordination_round` knob and its round count.
 
 The pre-coordination phase is an adversary-only set of turns that runs before
-iteration 1 of the main simulation (default: one round, configurable via
-`simulation.pre_coordination_rounds`). The adversary gets the planning-shaped
-prompt (with a phase-specific block explaining the round) and `post_message` to
-the coalition blackboard, but any environment-tool call (`broadcast_message`,
-`transfer_resources`, etc.) is silently dropped by the protocol layer.
+iteration 1 of the main simulation (default: one round, configurable via the
+`sweeps[].pre_coordination_rounds` axis with the global
+`simulation.pre_coordination_rounds` as fallback). The adversary gets the
+planning-shaped prompt (with a phase-specific block explaining the round) and
+`post_message` to the coalition blackboard, but any environment-tool call
+(`broadcast_message`, `transfer_resources`, etc.) is silently dropped by the
+protocol layer.
 
 Layers tested in isolation:
 
 1. Resolution: `_normalize_pre_coordination_value`, `_resolve_pre_coordination_round`,
    `_resolve_pre_coordination_axis`, and the strict
-   `_normalize/_resolve_pre_coordination_rounds` pair -- same precedence
+   `_normalize/_resolve_pre_coordination_rounds` /
+   `_resolve_pre_coordination_rounds_axis` family -- same precedence
    semantics as `disable_post_message` for the boolean.
-2. `run_id` suffixing: `_build_run_id` produces `__precoord` either alone or
-   after the existing post-message suffix.
+2. `run_id` suffixing: `_build_run_id` produces `__precoord<N>` either alone or
+   after the existing post-message suffix (`__nopm__precoord2`).
 3. Tool blocking: `LocalCommunicationProtocol.environment_handle_tool_call`
    returns a stub when `_ENV_TOOLS_BLOCKED` is set, and `post_message` flows
    through `blackboard_handle_tool_call` unaffected.
-4. `build_tables._RUN_ID_RE_V2` parses `__precoord` (alone or combined).
+4. `build_tables._RUN_ID_RE_V2` parses `__precoord` and `__precoord<N>`
+   (alone or combined).
 5. The multi-round phase runner: N rounds, one turn per adversary, honest
    agents skipped, round metadata passed through, per-round message caps and
    per-round blackboard snapshots.
@@ -123,34 +127,64 @@ class BuildRunIdSuffixTests(unittest.TestCase):
 
     def test_no_suffix_when_disabled(self) -> None:
         rid = run_mod._build_run_id(**self.BASE_KW)
-        self.assertFalse(rid.endswith("__precoord"))
+        self.assertNotIn("__precoord", rid)
         self.assertFalse(rid.endswith("__nopm"))
 
-    def test_precoord_alone(self) -> None:
-        rid = run_mod._build_run_id(**self.BASE_KW, pre_coordination_round=True)
-        self.assertTrue(rid.endswith("__precoord"))
+    def test_precoord_suffix_is_always_counted(self) -> None:
+        # The count is a sweep axis, so it is ALWAYS encoded -- even for 1.
+        # The legacy count-less `__precoord` must never be produced.
+        for rounds, expected in (
+            (1, "__precoord1"),
+            (2, "__precoord2"),
+            (3, "__precoord3"),
+        ):
+            with self.subTest(rounds=rounds):
+                rid = run_mod._build_run_id(
+                    **self.BASE_KW,
+                    pre_coordination_round=True,
+                    pre_coordination_rounds=rounds,
+                )
+                self.assertTrue(rid.endswith(expected))
+                self.assertFalse(rid.endswith("__precoord"))
 
     def test_precoord_with_nopm(self) -> None:
         rid = run_mod._build_run_id(
             **self.BASE_KW,
             disable_post_message=True,
             pre_coordination_round=True,
+            pre_coordination_rounds=2,
         )
-        self.assertTrue(rid.endswith("__nopm__precoord"))
+        self.assertTrue(rid.endswith("__nopm__precoord2"))
 
     def test_nopm_alone(self) -> None:
         rid = run_mod._build_run_id(**self.BASE_KW, disable_post_message=True)
         self.assertTrue(rid.endswith("__nopm"))
-        self.assertFalse("__precoord" in rid)
+        self.assertNotIn("__precoord", rid)
+
+    def test_different_counts_produce_different_ids(self) -> None:
+        rid_one = run_mod._build_run_id(
+            **self.BASE_KW,
+            pre_coordination_round=True,
+            pre_coordination_rounds=1,
+        )
+        rid_two = run_mod._build_run_id(
+            **self.BASE_KW,
+            pre_coordination_round=True,
+            pre_coordination_rounds=2,
+        )
+        self.assertNotEqual(rid_one, rid_two)
 
     def test_precoord_false_does_not_change_id(self) -> None:
         rid_a = run_mod._build_run_id(**self.BASE_KW, disable_post_message=True)
+        # The count is irrelevant when the phase is off: no suffix at all.
         rid_b = run_mod._build_run_id(
             **self.BASE_KW,
             disable_post_message=True,
             pre_coordination_round=False,
+            pre_coordination_rounds=3,
         )
         self.assertEqual(rid_a, rid_b)
+        self.assertNotIn("__precoord", rid_b)
 
 
 class BuildTablesRegexTests(unittest.TestCase):
@@ -160,7 +194,18 @@ class BuildTablesRegexTests(unittest.TestCase):
         )
         self.assertIsNotNone(m)
         self.assertEqual(m.group("precoord"), "__precoord")
+        self.assertIsNone(m.group("precoord_rounds"))
         self.assertIsNone(m.group("restriction"))
+
+    def test_precoord_counted(self) -> None:
+        for n in (1, 2, 10):
+            with self.subTest(n=n):
+                m = bt._RUN_ID_RE_V2.match(
+                    f"m__s__topocomplete__agents9_patients8_adv2_Resource_Provisioner_seed1__precoord{n}"
+                )
+                self.assertIsNotNone(m)
+                self.assertEqual(m.group("precoord"), f"__precoord{n}")
+                self.assertEqual(m.group("precoord_rounds"), str(n))
 
     def test_nopm_with_precoord(self) -> None:
         m = bt._RUN_ID_RE_V2.match(
@@ -169,6 +214,15 @@ class BuildTablesRegexTests(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertEqual(m.group("restriction"), "nopm")
         self.assertEqual(m.group("precoord"), "__precoord")
+
+    def test_nopm_with_counted_precoord(self) -> None:
+        m = bt._RUN_ID_RE_V2.match(
+            "m__s__topocomplete__agents9_patients8_adv2_Resource_Provisioner_seed1__nopm__precoord2"
+        )
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("restriction"), "nopm")
+        self.assertEqual(m.group("precoord"), "__precoord2")
+        self.assertEqual(m.group("precoord_rounds"), "2")
 
     def test_legacy_cut_after_r_suffix_no_longer_parses(self) -> None:
         # The `disable_post_message_after_round: N` axis is gone, so old run
@@ -1017,7 +1071,11 @@ class PostMessageAvailableDuringPreCoordination(unittest.TestCase):
 
 
 class PreCoordinationRoundsResolutionTests(unittest.TestCase):
-    """`simulation.pre_coordination_rounds` is strict and backward compatible."""
+    """`pre_coordination_rounds` is strict and backward compatible.
+
+    The global `simulation.pre_coordination_rounds` is the fallback; the
+    per-sweep axis is covered by `ResolvePreCoordinationRoundsAxisTests`.
+    """
 
     def test_default_is_one(self) -> None:
         self.assertEqual(run_mod._resolve_pre_coordination_rounds({}), 1)
@@ -1033,7 +1091,10 @@ class PreCoordinationRoundsResolutionTests(unittest.TestCase):
         cfg3 = {"simulation": {"pre_coordination_rounds": 4}}
         self.assertEqual(run_mod._resolve_pre_coordination_rounds(cfg3), 4)
 
-    def test_shipped_config_sets_two_rounds(self) -> None:
+    def test_shipped_config_no_global_count_and_sweep_declares_axis(self) -> None:
+        # The count moved to the sweep axis: the shipped config no longer sets
+        # the global value (so the fallback resolves to 1), and the sweeps that
+        # declare the axis override it.
         import yaml
         from pathlib import Path
 
@@ -1043,7 +1104,18 @@ class PreCoordinationRoundsResolutionTests(unittest.TestCase):
             / "collusion_via_tools_1.yaml"
         )
         cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-        self.assertEqual(run_mod._resolve_pre_coordination_rounds(cfg), 2)
+        self.assertEqual(run_mod._resolve_pre_coordination_rounds(cfg), 1)
+        self.assertNotIn("pre_coordination_rounds", cfg.get("simulation") or {})
+
+        sweeps = (cfg.get("experiment") or {}).get("sweeps") or []
+        by_name = {s.get("name"): s for s in sweeps}
+        benign = by_name["benign_baseline_sweep"]
+        self.assertEqual(
+            run_mod._resolve_pre_coordination_rounds_axis(
+                benign, cfg, phase_enabled=False
+            ),
+            [1],
+        )
 
     def test_invalid_values_are_rejected(self) -> None:
         # Booleans are `int` subclasses, so they need an explicit rejection.
@@ -1066,8 +1138,83 @@ class PreCoordinationRoundsResolutionTests(unittest.TestCase):
     def test_error_message_is_clear(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             run_mod._normalize_pre_coordination_rounds(0)
-        self.assertIn("simulation.pre_coordination_rounds", str(ctx.exception))
+        self.assertIn("pre_coordination_rounds", str(ctx.exception))
         self.assertIn(">= 1", str(ctx.exception))
+
+
+class ResolvePreCoordinationRoundsAxisTests(unittest.TestCase):
+    """The `sweeps[].pre_coordination_rounds` sweep axis."""
+
+    def test_absent_sweep_key_falls_through_to_global(self) -> None:
+        cfg = {"simulation": {"pre_coordination_rounds": 3}}
+        self.assertEqual(run_mod._resolve_pre_coordination_rounds_axis({}, cfg), [3])
+
+    def test_global_default_is_one(self) -> None:
+        self.assertEqual(run_mod._resolve_pre_coordination_rounds_axis({}, {}), [1])
+        self.assertEqual(run_mod._resolve_pre_coordination_rounds_axis({}, None), [1])
+
+    def test_sweep_scalar_wins_over_global(self) -> None:
+        cfg = {"simulation": {"pre_coordination_rounds": 3}}
+        self.assertEqual(
+            run_mod._resolve_pre_coordination_rounds_axis(
+                {"pre_coordination_rounds": 2}, cfg
+            ),
+            [2],
+        )
+
+    def test_sweep_list_expands_to_one_value_per_run(self) -> None:
+        cfg = {"simulation": {"pre_coordination_rounds": 3}}
+        self.assertEqual(
+            run_mod._resolve_pre_coordination_rounds_axis(
+                {"pre_coordination_rounds": [1, 2]}, cfg
+            ),
+            [1, 2],
+        )
+        self.assertEqual(
+            run_mod._resolve_pre_coordination_rounds_axis(
+                {"pre_coordination_rounds": [2, 1, 4]}, cfg
+            ),
+            [2, 1, 4],
+        )
+
+    def test_phase_off_collapses_to_single_value(self) -> None:
+        # The count is inert when the phase is off; expanding it would make two
+        # runs share a run_id (a directory collision).
+        cfg = {}
+        self.assertEqual(
+            run_mod._resolve_pre_coordination_rounds_axis(
+                {"pre_coordination_rounds": [1, 2]}, cfg, phase_enabled=False
+            ),
+            [1],
+        )
+        self.assertEqual(
+            run_mod._resolve_pre_coordination_rounds_axis(
+                {"pre_coordination_rounds": [3, 4]}, cfg, phase_enabled=False
+            ),
+            [3],
+        )
+
+    def test_phase_on_keeps_all_values(self) -> None:
+        self.assertEqual(
+            run_mod._resolve_pre_coordination_rounds_axis(
+                {"pre_coordination_rounds": [1, 2]}, {}, phase_enabled=True
+            ),
+            [1, 2],
+        )
+
+    def test_invalid_values_are_rejected(self) -> None:
+        for bad in (True, False, 0, -1, 1.5, "2", None, [], {}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    run_mod._resolve_pre_coordination_rounds_axis(
+                        {"pre_coordination_rounds": bad}, {}
+                    )
+
+    def test_invalid_element_in_list_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            run_mod._resolve_pre_coordination_rounds_axis(
+                {"pre_coordination_rounds": [1, 0]}, {}
+            )
 
 
 class _FakePreCoordAgent:
@@ -1312,7 +1459,7 @@ class RunPreCoordinationRoundsTests(unittest.TestCase):
             self.assertEqual(ctx["pre_coordination_rounds"], 2)
             self.assertTrue(ctx["post_message_available"])
 
-    def test_exception_restores_prior_task_state(self) -> None:
+    def test_failing_turn_does_not_propagate_and_restores_state(self) -> None:
         from experiments.common._patch_terrarium import (
             get_post_message_call_limit,
             get_secret_blackboard_id,
@@ -1336,18 +1483,25 @@ class RunPreCoordinationRoundsTests(unittest.TestCase):
         set_secret_blackboard_id(7)
         set_post_message_call_limit(9)
         try:
-            with self.assertRaises(RuntimeError):
-                asyncio.run(
-                    run_mod._run_pre_coordination_rounds(
-                        env=env,
-                        protocol=_BoomProtocol(),
-                        roles={"Adv1": "adversary"},
-                        num_rounds=2,
-                        max_messages=3,
-                        secret_blackboard_id=42,
-                        extra_fields=lambda name, phase: {},
-                    )
+            # The runner deliberately catches per-turn failures (it records
+            # them as `[ERROR] ...` turns and continues), so nothing propagates
+            # out of the helper. One failing turn per round is recorded, and the
+            # prior task-local state is restored afterwards.
+            turns = asyncio.run(
+                run_mod._run_pre_coordination_rounds(
+                    env=env,
+                    protocol=_BoomProtocol(),
+                    roles={"Adv1": "adversary"},
+                    num_rounds=2,
+                    max_messages=3,
+                    secret_blackboard_id=42,
+                    extra_fields=lambda name, phase: {},
                 )
+            )
+            self.assertEqual([t["agent"] for t in turns], ["Adv1", "Adv1"])
+            self.assertEqual([t["round"] for t in turns], [1, 2])
+            for turn in turns:
+                self.assertTrue(turn["response"].startswith("[ERROR]"))
             self.assertTrue(is_post_message_disabled())
             self.assertTrue(is_env_tools_blocked())
             self.assertEqual(get_secret_blackboard_id(), 7)

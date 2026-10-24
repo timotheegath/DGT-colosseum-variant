@@ -60,11 +60,12 @@ class RunSpec:
             seed=self.seed,
             disable_post_message=self.disable_post_message,
             pre_coordination_round=self.pre_coordination_round,
+            pre_coordination_rounds=self.pre_coordination_rounds,
         )
 
     @property
     def run_id_candidates(self) -> List[str]:
-        return [
+        candidates = [
             self.run_id,
             run_mod._build_run_id_v1(
                 model_label=self.model_label,
@@ -75,6 +76,31 @@ class RunSpec:
                 seed=self.seed,
             ),
         ]
+        if self.pre_coordination_round:
+            # Legacy pre-coordination directories (created before the round
+            # count became part of `run_id`) carry the count-less
+            # ``__precoord`` suffix. No canonical id equals it any more
+            # (canonical ids are ``__precoord1``, ``__precoord2``, ...), so
+            # adding the candidate unconditionally can never redirect a rerun
+            # of a different treatment onto a legacy directory: whether the
+            # directory actually satisfies the spec is decided by
+            # `_run_matches_spec`'s metadata comparison (recorded effective
+            # round count vs expected).
+            legacy_counted = run_mod._build_run_id(
+                model_label=self.model_label,
+                sweep_name=self.sweep_name,
+                topology=self.topology,
+                num_agents=self.num_agents,
+                num_patients=self.num_patients,
+                adversary_count=self.adversary_count,
+                target_role=self.target_role,
+                seed=self.seed,
+                disable_post_message=self.disable_post_message,
+                pre_coordination_round=True,
+                pre_coordination_rounds=1,
+            )
+            candidates.append(legacy_counted.removesuffix("__precoord1") + "__precoord")
+        return candidates
 
     @property
     def run_label(self) -> str:
@@ -176,8 +202,9 @@ def _run_matches_spec(
 
     File presence is not enough: a run produced with a different
     pre-coordination round count must be rerun rather than accepted as
-    complete. `run_id` intentionally stays stable, so this metadata is the
-    only place the difference is observable.
+    complete. The canonical `run_id` now encodes the count, but this metadata
+    check is still what decides whether a *legacy* directory (whose id has no
+    count) actually satisfies the spec.
     """
     if not _is_run_complete(run_dir, rerun_error_turns=rerun_error_turns):
         return False
@@ -217,7 +244,7 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
 
     # Global (non-sweep) setting. Validated here as well as in `resume_runs`
     # so dry-runs fail before touching the output root.
-    resolved_precoord_rounds = run_mod._resolve_pre_coordination_rounds(cfg)
+    run_mod._resolve_pre_coordination_rounds(cfg)
 
     for model in models:
         model_label = str(model.get("label") or "model")
@@ -257,29 +284,38 @@ def _iter_expected_run_specs(cfg: Dict[str, Any]) -> Iterable[RunSpec]:
                             for num_patients in patient_counts:
                                 for resolved_dpm in resolved_dpm_list:
                                     for precoord in resolved_precoord:
-                                        for seed in seeds:
-                                            yield RunSpec(
-                                                model_label=model_label,
-                                                model_llm_cfg=llm_cfg,
-                                                sweep_name=sweep_name,
-                                                topology=str(topology),
-                                                num_agents=int(n),
-                                                num_patients=int(
-                                                    run_mod._resolve_num_patients_spec(
-                                                        raw=num_patients,
-                                                        num_agents=int(n),
-                                                    )
-                                                ),
-                                                adversary_count=int(a),
-                                                target_role=role,
-                                                seed=int(seed),
-                                                disable_post_message=resolved_dpm,
-                                                pre_coordination_round=precoord,
-                                                pre_coordination_rounds=(
-                                                    resolved_precoord_rounds
-                                                ),
-                                                pre_coordination_max_messages=resolved_precoord_max,
-                                            )
+                                        # Mirror the runner: the phase flag
+                                        # decides whether the round-count axis
+                                        # expands or collapses to one value.
+                                        rounds_axis = run_mod._resolve_pre_coordination_rounds_axis(
+                                            sweep,
+                                            cfg,
+                                            phase_enabled=precoord,
+                                        )
+                                        for resolved_rounds in rounds_axis:
+                                            for seed in seeds:
+                                                yield RunSpec(
+                                                    model_label=model_label,
+                                                    model_llm_cfg=llm_cfg,
+                                                    sweep_name=sweep_name,
+                                                    topology=str(topology),
+                                                    num_agents=int(n),
+                                                    num_patients=int(
+                                                        run_mod._resolve_num_patients_spec(
+                                                            raw=num_patients,
+                                                            num_agents=int(n),
+                                                        )
+                                                    ),
+                                                    adversary_count=int(a),
+                                                    target_role=role,
+                                                    seed=int(seed),
+                                                    disable_post_message=resolved_dpm,
+                                                    pre_coordination_round=precoord,
+                                                    pre_coordination_rounds=(
+                                                        resolved_rounds
+                                                    ),
+                                                    pre_coordination_max_messages=resolved_precoord_max,
+                                                )
 
 
 def _select_incomplete_runs(
@@ -314,6 +350,8 @@ async def resume_runs(
     rerun_error_turns: bool = True,
 ) -> None:
     run_mod._resolve_pre_coordination_rounds(cfg)
+    for sweep in (cfg.get("experiment") or {}).get("sweeps") or []:
+        run_mod._resolve_pre_coordination_rounds_axis(sweep, cfg)
     run_mod._ensure_dir(root)
     run_mod._configure_experiment_logging(root)
 
@@ -395,6 +433,7 @@ async def resume_runs(
                         out_dir=root,
                         disable_post_message=spec.disable_post_message,
                         pre_coordination_round=spec.pre_coordination_round,
+                        pre_coordination_rounds=spec.pre_coordination_rounds,
                         pre_coordination_max_messages=(
                             spec.pre_coordination_max_messages
                         ),
@@ -443,6 +482,7 @@ async def resume_runs(
                         out_dir=root,
                         disable_post_message=spec.disable_post_message,
                         pre_coordination_round=spec.pre_coordination_round,
+                        pre_coordination_rounds=spec.pre_coordination_rounds,
                         pre_coordination_max_messages=(
                             spec.pre_coordination_max_messages
                         ),

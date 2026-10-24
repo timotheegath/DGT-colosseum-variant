@@ -12,6 +12,7 @@ Stdlib unittest only; no network, no LLM calls, no dependency on repo configs.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import unittest
@@ -102,9 +103,57 @@ def _run_from_config_ids(cfg: Dict[str, Any]) -> List[str]:
             seed=int(kw["seed"]),
             disable_post_message=kw["disable_post_message"],
             pre_coordination_round=kw["pre_coordination_round"],
+            pre_coordination_rounds=kw["pre_coordination_rounds"],
         )
         for kw in planned
     ]
+
+
+def _run_from_config_ids_and_progress(
+    cfg: Dict[str, Any],
+) -> tuple[List[str], Dict[str, Any]]:
+    """Like `_run_from_config_ids`, but also return the written `progress.json`."""
+    planned: List[Dict[str, Any]] = []
+
+    async def _fake_run_single(**kwargs: Any) -> Dict[str, Any]:
+        planned.append(kwargs)
+        return {"run_id": "stub"}
+
+    original = run_mod._run_single
+    run_mod._run_single = _fake_run_single  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "out"
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+            root = asyncio.run(
+                run_mod.run_from_config(str(config_path), out_dir=str(out_dir))
+            )
+            progress = json.loads((root / "progress.json").read_text(encoding="utf-8"))
+    finally:
+        run_mod._run_single = original  # type: ignore[assignment]
+
+    ids = [
+        run_mod._build_run_id(
+            model_label=str(kw["model_label"]),
+            sweep_name=str(kw["sweep_name"]),
+            topology=str(kw["topology"]),
+            num_agents=int(kw["num_agents"]),
+            num_patients=int(
+                run_mod._resolve_num_patients_spec(
+                    raw=kw["num_patients"], num_agents=int(kw["num_agents"])
+                )
+            ),
+            adversary_count=int(kw["adversary_count"]),
+            target_role=kw["target_role"],
+            seed=int(kw["seed"]),
+            disable_post_message=kw["disable_post_message"],
+            pre_coordination_round=kw["pre_coordination_round"],
+            pre_coordination_rounds=kw["pre_coordination_rounds"],
+        )
+        for kw in planned
+    ]
+    return ids, {"progress": progress, "planned": len(planned)}
 
 
 class ResumeRestrictionTests(unittest.TestCase):
@@ -170,7 +219,7 @@ class ResumeRestrictionTests(unittest.TestCase):
         )
 
         self.assertEqual(len(run_ids), 1)
-        self.assertTrue(run_ids[0].endswith("__nopm__precoord"))
+        self.assertTrue(run_ids[0].endswith("__nopm__precoord1"))
 
     def test_precoord_axis_alone(self) -> None:
         cfg = _base_cfg(
@@ -181,7 +230,7 @@ class ResumeRestrictionTests(unittest.TestCase):
         )
 
         self.assertEqual(len(run_ids), 1)
-        self.assertTrue(run_ids[0].endswith("__precoord"))
+        self.assertTrue(run_ids[0].endswith("__precoord1"))
         self.assertFalse("__nopm" in run_ids[0])
 
     def test_spec_count_and_ids_match_runner_plan(self) -> None:
@@ -246,6 +295,76 @@ class ResumeRestrictionTests(unittest.TestCase):
 
         self.assertEqual(len(planned_ids), 4)  # 2x2 cross product
         self.assertEqual(spec_ids, planned_ids)
+
+    def test_precoord_rounds_axis_matches_runner_plan(self) -> None:
+        # Cross the round-count axis with the phase flag and the restriction.
+        # The phase flag collapses the count axis when it is off.
+        sweep = _sweep(
+            disable_post_message=[True, False],
+            pre_coordination_round=[True, False],
+            pre_coordination_rounds=[1, 2],
+        )
+        cfg = _base_cfg(sweep=sweep, exp_extra={"seeds": [1]})
+
+        planned_ids = set(_run_from_config_ids(cfg))
+        spec_ids = {spec.run_id for spec in resume_mod._iter_expected_run_specs(cfg)}
+
+        self.assertEqual(spec_ids, planned_ids)
+        # 3 distinct round-count combinations per (disable_post_message, seed):
+        # counts {1, 2} for phase-on and the collapsed {1} for phase-off.
+        # => 2 dpm x 3 x 1 seed = 6.
+        self.assertEqual(len(planned_ids), 6)
+        # The two different counts are present for phase-on runs only.
+        self.assertEqual(
+            {r.rsplit("__precoord", 1)[1] for r in planned_ids if "__precoord" in r},
+            {"1", "2"},
+        )
+        self.assertEqual(sum("__precoord" in r for r in planned_ids), 4)
+
+    def test_phase_off_collapses_rounds_axis(self) -> None:
+        sweep = _sweep(
+            disable_post_message=[False],
+            pre_coordination_round=[False],
+            pre_coordination_rounds=[1, 2, 3],
+        )
+        cfg = _base_cfg(sweep=sweep, exp_extra={"seeds": [1]})
+
+        planned_ids = set(_run_from_config_ids(cfg))
+        spec_ids = {spec.run_id for spec in resume_mod._iter_expected_run_specs(cfg)}
+
+        self.assertEqual(spec_ids, planned_ids)
+        self.assertEqual(len(planned_ids), 1)
+        self.assertFalse(any("__precoord" in r for r in planned_ids))
+
+    def test_progress_total_runs_matches_planned(self) -> None:
+        sweep = _sweep(
+            disable_post_message=[True, False],
+            pre_coordination_round=[True, False],
+            pre_coordination_rounds=[1, 2],
+        )
+        cfg = _base_cfg(sweep=sweep, exp_extra={"seeds": [1, 2]})
+
+        ids, info = _run_from_config_ids_and_progress(cfg)
+
+        # The pre-count must mirror the scheduler exactly (2 dpm x 3 combos
+        # x 2 seeds = 12).
+        self.assertEqual(info["planned"], 12)
+        self.assertEqual(len(ids), 12)
+        self.assertEqual(info["progress"]["total_runs"], info["planned"])
+
+    def test_invalid_sweep_count_rejected_before_root_created(self) -> None:
+        sweep = _sweep(pre_coordination_round=[True], pre_coordination_rounds=[0])
+        cfg = _base_cfg(sweep=sweep)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "out"
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                asyncio.run(
+                    run_mod.run_from_config(str(config_path), out_dir=str(out_dir))
+                )
+            # Validation happens before the output root is created.
+            self.assertFalse(out_dir.exists())
 
 
 if __name__ == "__main__":

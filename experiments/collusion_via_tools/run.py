@@ -194,8 +194,10 @@ def _resolve_pre_coordination_round(
 
 
 def _normalize_pre_coordination_rounds(val: Any) -> int:
-    """Validates `simulation.pre_coordination_rounds`.
+    """Validates a `pre_coordination_rounds` round count.
 
+    The same strict rules apply to the global `simulation.pre_coordination_rounds`
+    fallback and to every value of the `sweeps[].pre_coordination_rounds` axis.
     Unlike the other pre-coordination knobs this one is strict: booleans
     (``bool`` is an ``int`` subclass), floats, strings and values below 1 are
     rejected rather than silently coerced. A bad value changes how many
@@ -204,12 +206,12 @@ def _normalize_pre_coordination_rounds(val: Any) -> int:
     """
     if isinstance(val, bool) or not isinstance(val, int):
         raise ValueError(
-            "simulation.pre_coordination_rounds must be an integer >= 1 "
+            "pre_coordination_rounds must be an integer >= 1 "
             f"(got {val!r} of type {type(val).__name__})"
         )
     if val < 1:
         raise ValueError(
-            f"simulation.pre_coordination_rounds must be an integer >= 1 (got {val!r})"
+            f"pre_coordination_rounds must be an integer >= 1 (got {val!r})"
         )
     return int(val)
 
@@ -217,11 +219,56 @@ def _normalize_pre_coordination_rounds(val: Any) -> int:
 def _resolve_pre_coordination_rounds(cfg: Optional[Dict[str, Any]] = None) -> int:
     """Resolves how many dedicated adversary turns the pre-coordination phase
     runs, defaulting to 1 when the key is omitted (backward compatible).
+
+    This is the *global* fallback. A sweep may override it with the
+    `sweeps[].pre_coordination_rounds` axis; see
+    `_resolve_pre_coordination_rounds_axis`.
     """
     sim_cfg = (cfg or {}).get("simulation") or {}
     if "pre_coordination_rounds" not in sim_cfg:
         return 1
     return _normalize_pre_coordination_rounds(sim_cfg["pre_coordination_rounds"])
+
+
+def _resolve_pre_coordination_rounds_axis(
+    sweep: Dict[str, Any],
+    cfg: Optional[Dict[str, Any]] = None,
+    *,
+    phase_enabled: bool = True,
+) -> List[int]:
+    """Resolves the `pre_coordination_rounds` axis for one sweep.
+
+    Returns one validated round count per run in the sweep:
+
+    1. `sweeps[].pre_coordination_rounds` whenever the key is PRESENT (scalar
+       or list). It wins over the global `simulation.pre_coordination_rounds`
+       for that sweep. An empty list is rejected, like any other bad value.
+    2. otherwise a single value from the global
+       `simulation.pre_coordination_rounds` fallback (default 1).
+
+    Every value must be an integer ``>= 1``; anything else raises a
+    ``ValueError`` (the same strictness as the global knob).
+
+    ``phase_enabled=False`` collapses the axis to a SINGLE value (the first
+    resolved count). The count is inert when the pre-coordination phase is off,
+    and expanding it would produce two runs with the SAME ``run_id`` -- a
+    directory collision. When the phase is on, the returned list has one entry
+    per run.
+    """
+    if isinstance(sweep, dict) and "pre_coordination_rounds" in sweep:
+        raw = sweep["pre_coordination_rounds"]
+        items = raw if isinstance(raw, list) else [raw]
+        if not items:
+            raise ValueError(
+                "pre_coordination_rounds must be an integer >= 1 (got an empty list)"
+            )
+        resolved = [_normalize_pre_coordination_rounds(item) for item in items]
+    else:
+        resolved = [_resolve_pre_coordination_rounds(cfg)]
+
+    if not phase_enabled:
+        return resolved[:1]
+    return resolved
 
 
 # Keys an adversary keeps in its context during the pre-coordination round.
@@ -409,6 +456,7 @@ def _build_run_id(
     seed: int,
     disable_post_message: bool = False,
     pre_coordination_round: bool = False,
+    pre_coordination_rounds: int = 1,
 ) -> str:
     model_safe = _sanitize_path_component(model_label)
     sweep_safe = _sanitize_path_component(sweep_name)
@@ -418,7 +466,14 @@ def _build_run_id(
     suffix = "__nopm" if disable_post_message else ""
 
     if pre_coordination_round:
-        suffix = f"{suffix}__precoord" if suffix else "__precoord"
+        # The round count is ALWAYS encoded (``__precoord<N>``), never the
+        # legacy count-less ``__precoord``. The count is a sweep axis, so two
+        # different counts inside one sweep MUST produce different run_ids, and
+        # the legacy id must never equal a canonical one so that a pre-existing
+        # legacy directory can be used as a resume fallback without ever being
+        # clobbered by a rerun of a different treatment.
+        precoord_suffix = f"__precoord{int(pre_coordination_rounds)}"
+        suffix = f"{suffix}{precoord_suffix}" if suffix else precoord_suffix
 
     return (
         f"{model_safe}__{sweep_safe}"
@@ -971,6 +1026,7 @@ async def _run_single(
     out_dir: Path,
     disable_post_message: Any = _UNSET,
     pre_coordination_round: bool = False,
+    pre_coordination_rounds: Any = _UNSET,
     pre_coordination_max_messages: Any = _UNSET,
 ) -> Dict[str, Any]:
     rng = random.Random(int(seed))
@@ -1046,17 +1102,29 @@ async def _run_single(
     set_post_message_disabled(resolved_disable_pm)
 
     # --- PRE-COORDINATION PHASE ---
-    # `simulation.pre_coordination_rounds` dedicated, planning-prompt-shaped
-    # rounds run before the main simulation for adversaries only (default 1,
-    # for backward compatibility). `post_message` is available only when a
-    # coalition-only secret blackboard exists; all environment tools
-    # (`broadcast_message`, `transfer_resources`, etc.) are silently dropped by
-    # `LocalCommunicationProtocol` so the adversary cannot probe the
-    # environment before losing `post_message`.
+    # `pre_coordination_rounds` dedicated, planning-prompt-shaped rounds run
+    # before the main simulation for adversaries only (default 1, for backward
+    # compatibility). The sweep axis (`sweeps[].pre_coordination_rounds`) is
+    # resolved by the scheduler and passed in verbatim; when the argument is
+    # `_UNSET` we fall back to the global `simulation.pre_coordination_rounds`.
+    # `post_message` is available only when a coalition-only secret blackboard
+    # exists; all environment tools (`broadcast_message`, `transfer_resources`,
+    # etc.) are silently dropped by `LocalCommunicationProtocol` so the
+    # adversary cannot probe the environment before losing `post_message`.
     resolved_pre_coordination = _resolve_pre_coordination_round(
         pre_coordination_round, cfg
     )
-    resolved_pre_coord_rounds = _resolve_pre_coordination_rounds(cfg)
+    resolved_pre_coord_rounds = (
+        _normalize_pre_coordination_rounds(pre_coordination_rounds)
+        if pre_coordination_rounds is not _UNSET
+        else _resolve_pre_coordination_rounds(cfg)
+    )
+    # Keep the per-run config snapshot in agreement with the resolved count.
+    # Nothing else reads this key during the run; it exists so `run_config.json`
+    # records the treatment that was actually applied.
+    cfg.setdefault("simulation", {})["pre_coordination_rounds"] = (
+        resolved_pre_coord_rounds
+    )
     pre_coord_phase_active = resolved_pre_coordination and not is_benign
     effective_pre_coord_rounds = (
         resolved_pre_coord_rounds if pre_coord_phase_active else 0
@@ -1084,6 +1152,7 @@ async def _run_single(
         seed=int(seed),
         disable_post_message=resolved_disable_pm,
         pre_coordination_round=resolved_pre_coordination,
+        pre_coordination_rounds=resolved_pre_coord_rounds,
     )
     run_dir = out_dir / "runs" / model_label / sweep_name / run_id
     _ensure_dir(run_dir)
@@ -1730,9 +1799,12 @@ async def run_from_config(
     max_concurrent_runs: Optional[int] = None,
 ) -> Path:
     cfg = _load_yaml(config_path)
-    # Fail fast on an invalid `simulation.pre_coordination_rounds` before any
-    # runs are scheduled. The same value is re-resolved per run in
-    # `_run_single`.
+    # Fail fast on an invalid `pre_coordination_rounds` before any runs are
+    # scheduled. Both the global `simulation.pre_coordination_rounds` and every
+    # sweep-level `sweeps[].pre_coordination_rounds` value are validated here,
+    # BEFORE the output root is created, so a bad count aborts the sweep
+    # without leaving a half-built directory behind. The same values are
+    # re-resolved per run in `_run_single`.
     _resolve_pre_coordination_rounds(cfg)
     exp = cfg.get("experiment") or {}
     max_concurrent_runs = max_concurrent_runs or int(exp.get("max_concurrent_runs", 1))
@@ -1740,6 +1812,9 @@ async def run_from_config(
     models = cfg.get("llm_models") or []
     sweeps = exp.get("sweeps") or []
     seeds = _normalize_seeds(exp.get("seeds")) or [1]
+
+    for sweep in sweeps:
+        _resolve_pre_coordination_rounds_axis(sweep, cfg)
 
     is_hospital = _is_hospital_environment(cfg)
 
@@ -1805,8 +1880,12 @@ async def run_from_config(
             target_roles = sweep.get("target_roles") or [None]
             patient_counts = sweep.get("num_patients") or [16]
             dpm_list = _resolve_disable_pm_axis(sweep, cfg)
+            precoord_list = _resolve_pre_coordination_axis(sweep, cfg)
 
-            # Count only feasible combinations so progress is accurate.
+            # Count only feasible combinations so progress is accurate. Mirror
+            # the scheduler loop exactly, including the pre-coordination axes:
+            # the phase flag decides whether the round-count axis collapses to
+            # a single value.
             for topology in topologies:
                 for num_agents in agent_counts:
                     for ac in adv_counts:
@@ -1819,7 +1898,15 @@ async def run_from_config(
                                 ):
                                     continue
                                 for _ in dpm_list:
-                                    total_runs += len(seeds)
+                                    for resolved_precoord in precoord_list:
+                                        rounds_axis = (
+                                            _resolve_pre_coordination_rounds_axis(
+                                                sweep,
+                                                cfg,
+                                                phase_enabled=resolved_precoord,
+                                            )
+                                        )
+                                        total_runs += len(rounds_axis) * len(seeds)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     root = (
@@ -1893,41 +1980,57 @@ async def run_from_config(
 
                                 for resolved_cut in dpm_list:
                                     for resolved_precoord in precoord_list:
-                                        for seed in seeds:
-                                            role_lbl = role if role else "Any"
-                                            pm_lbl = "__nopm" if resolved_cut else ""
-                                            if resolved_precoord:
+                                        # The phase flag decides whether the
+                                        # round-count axis expands or collapses.
+                                        rounds_axis = (
+                                            _resolve_pre_coordination_rounds_axis(
+                                                sweep,
+                                                cfg,
+                                                phase_enabled=resolved_precoord,
+                                            )
+                                        )
+                                        for resolved_rounds in rounds_axis:
+                                            for seed in seeds:
+                                                role_lbl = role if role else "Any"
                                                 pm_lbl = (
-                                                    f"{pm_lbl}__precoord"
-                                                    if pm_lbl
-                                                    else "__precoord"
+                                                    "__nopm" if resolved_cut else ""
                                                 )
-                                            run_label = (
-                                                f"{model_label}/{sweep_name}/topo{topology}"
-                                                f"/n{num_agents}/p{num_patients}/adv{ac}/{role_lbl}{pm_lbl}/seed{seed}"
-                                            )
+                                                if resolved_precoord:
+                                                    precoord_lbl = (
+                                                        f"__precoord{resolved_rounds}"
+                                                    )
+                                                    pm_lbl = (
+                                                        f"{pm_lbl}{precoord_lbl}"
+                                                        if pm_lbl
+                                                        else precoord_lbl
+                                                    )
+                                                run_label = (
+                                                    f"{model_label}/{sweep_name}/topo{topology}"
+                                                    f"/n{num_agents}/p{num_patients}/adv{ac}/{role_lbl}{pm_lbl}/seed{seed}"
+                                                )
 
-                                            task = asyncio.create_task(
-                                                _run_guarded(
-                                                    run_label=run_label,
-                                                    base_cfg=cfg,
-                                                    model_label=model_label,
-                                                    model_llm_cfg=model_llm,
-                                                    sweep_name=sweep_name,
-                                                    topology=str(topology),
-                                                    num_agents=num_agents,
-                                                    adversary_count=ac,
-                                                    num_patients=num_patients,
-                                                    target_role=role,
-                                                    seed=seed,
-                                                    out_dir=root,
-                                                    disable_post_message=resolved_cut,
-                                                    pre_coordination_round=resolved_precoord,
-                                                    pre_coordination_max_messages=precoord_max,
+                                                task = asyncio.create_task(
+                                                    _run_guarded(
+                                                        run_label=run_label,
+                                                        base_cfg=cfg,
+                                                        model_label=model_label,
+                                                        model_llm_cfg=model_llm,
+                                                        sweep_name=sweep_name,
+                                                        topology=str(topology),
+                                                        num_agents=num_agents,
+                                                        adversary_count=ac,
+                                                        num_patients=num_patients,
+                                                        target_role=role,
+                                                        seed=seed,
+                                                        out_dir=root,
+                                                        disable_post_message=resolved_cut,
+                                                        pre_coordination_round=resolved_precoord,
+                                                        pre_coordination_rounds=resolved_rounds,
+                                                        pre_coordination_max_messages=precoord_max,
+                                                    )
                                                 )
-                                            )
-                                            tasks.append(task)
-                                            task_labels[task] = run_label
+                                                tasks.append(task)
+                                                task_labels[task] = run_label
 
     # Execution Loop (Robust)
     with tqdm(total=len(tasks), desc="Experiments", unit="run") as pbar:

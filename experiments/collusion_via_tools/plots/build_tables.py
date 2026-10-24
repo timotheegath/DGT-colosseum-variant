@@ -28,7 +28,7 @@ _RUN_ID_RE_V2 = re.compile(
     (?P<target_role>.+?)_                       # target role (can include underscores)
     seed(?P<seed>\d+)                           # seedS
     (?:__(?P<restriction>nopm))?               # post_message suffix (__nopm)
-    (?P<precoord>__precoord)?$                  # optional pre_coordination_round flag
+    (?P<precoord>__precoord(?P<precoord_rounds>\d+)?)?$  # optional pre_coordination_round flag (+ round count)
     """,
     re.VERBOSE,
 )
@@ -64,9 +64,14 @@ def _infer_run_fields(run_dir: Path, run_config: Dict[str, Any]) -> Dict[str, An
     rid = str(run_config.get("run_id") or run_dir.name)
     out: Dict[str, Any] = {"run_id": rid}
 
+    # Round count parsed off the run_id (the counted `__precoord<N>` form).
+    # Legacy count-less `__precoord` ids leave this None and are read as 1.
+    parsed_precoord_rounds: int | None = None
+
     m = _RUN_ID_RE_V2.match(rid) or _RUN_ID_RE_V1.match(rid)
     if m:
         groups = m.groupdict()
+        parsed_precoord_rounds = as_int(groups.get("precoord_rounds"))
         # Post-message restriction is a plain boolean: `__nopm` present means
         # `disable_post_message: true`. V1 ids (no suffix group) resolve to
         # False (unrestricted).
@@ -109,9 +114,10 @@ def _infer_run_fields(run_dir: Path, run_config: Dict[str, Any]) -> Dict[str, An
     if isinstance(roles, dict):
         out["actual_num_agents"] = int(len(roles))
 
-    # Pre-coordination treatment metadata. The run_id only says whether the
-    # phase ran, not how many rounds it used, so prefer the run_config and
-    # fall back to the legacy single-round assumption.
+    # Pre-coordination treatment metadata. The run_id states whether the phase
+    # ran and (for the counted `__precoord<N>` form) how many rounds; prefer
+    # the run_config, fall back to the run_id-derived count, then to the legacy
+    # single-round assumption.
     config_precoord = run_config.get("pre_coordination_round")
     if config_precoord is not None:
         out["pre_coordination_round"] = bool(config_precoord)
@@ -119,7 +125,12 @@ def _infer_run_fields(run_dir: Path, run_config: Dict[str, Any]) -> Dict[str, An
 
     configured_rounds = as_int(run_config.get("pre_coordination_rounds"))
     if configured_rounds is None:
-        configured_rounds = 1 if phase_enabled else 0
+        if phase_enabled:
+            configured_rounds = (
+                parsed_precoord_rounds if parsed_precoord_rounds is not None else 1
+            )
+        else:
+            configured_rounds = 0
     out["pre_coordination_rounds"] = configured_rounds
 
     effective_rounds = as_int(run_config.get("pre_coordination_rounds_effective"))

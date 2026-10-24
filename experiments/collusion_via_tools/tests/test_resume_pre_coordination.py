@@ -1,10 +1,11 @@
-"""Resume behavior for `simulation.pre_coordination_rounds`.
+"""Resume behavior for the `pre_coordination_rounds` sweep axis.
 
-The round count is global (not a sweep axis) and is not encoded in `run_id`.
-Resume therefore compares the treatment metadata in an existing
-`run_config.json` against the expected spec. A completed run produced with a
-different count must be rerun; legacy run configs that predate the setting
-executed exactly one round.
+The count is now a sweep axis and is encoded in `run_id` as `__precoord<N>`.
+Resume compares the treatment metadata in an existing `run_config.json` against
+the expected spec, and additionally accepts a pre-existing legacy directory
+whose id carries the count-less `__precoord` suffix. A completed run produced
+with a different count must be rerun; legacy run configs that predate the
+setting executed exactly one round.
 """
 
 from __future__ import annotations
@@ -73,6 +74,10 @@ def _write_run(root: Path, run_id: str, run_config: Dict[str, Any]) -> Path:
         path = run_dir / filename
         if filename == "run_config.json":
             path.write_text(json.dumps(run_config), encoding="utf-8")
+        elif filename == "agent_turns.json":
+            # `resume._has_error_turn` treats a non-list payload as a failed
+            # turn, so this must be a (empty) JSON list, not `{}`.
+            path.write_text("[]", encoding="utf-8")
         else:
             path.write_text("{}", encoding="utf-8")
     return run_dir
@@ -107,6 +112,39 @@ class ExpectedSpecTests(unittest.TestCase):
                 )
             # Validation happens before the output root is created.
             self.assertFalse(missing_root.exists())
+
+    def test_invalid_sweep_count_rejected_before_dry_run(self) -> None:
+        # The fail-fast property must cover sweep-level values too, not just
+        # the global fallback.
+        cfg = _cfg(rounds=2)
+        cfg["experiment"]["sweeps"][0]["pre_coordination_rounds"] = [0]
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_root = Path(tmp) / "does-not-exist"
+            with self.assertRaises(ValueError):
+                asyncio.run(
+                    resume_mod.resume_runs(
+                        root=missing_root,
+                        cfg=cfg,
+                        max_concurrent_runs=1,
+                        stop_on_error=False,
+                        dry_run=True,
+                    )
+                )
+            self.assertFalse(missing_root.exists())
+
+    def test_sweep_axis_overrides_global_fallback(self) -> None:
+        cfg = _cfg(rounds=2)
+        cfg["experiment"]["sweeps"][0]["pre_coordination_rounds"] = [1, 2]
+        specs = list(resume_mod._iter_expected_run_specs(cfg))
+        self.assertEqual(sorted(s.pre_coordination_rounds for s in specs), [1, 2])
+        # The global fallback is ignored for this sweep: no third run.
+        self.assertEqual(len(specs), 2)
+
+    def test_axis_collapses_when_phase_off(self) -> None:
+        cfg = _cfg(rounds=2, phase=False)
+        cfg["experiment"]["sweeps"][0]["pre_coordination_rounds"] = [1, 2]
+        specs = list(resume_mod._iter_expected_run_specs(cfg))
+        self.assertEqual([s.pre_coordination_rounds for s in specs], [1])
 
 
 class RunMatchesSpecTests(unittest.TestCase):
@@ -180,6 +218,74 @@ class RunMatchesSpecTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_run(root, expected.run_id, {"pre_coordination_round": True})
+            incomplete, completed, total = resume_mod._select_incomplete_runs(
+                root=root, cfg=cfg
+            )
+            self.assertEqual(total, 1)
+            self.assertEqual(completed, 0)
+            self.assertEqual([s.run_id for s in incomplete], [expected.run_id])
+
+
+class LegacyPrecoordCandidateTests(unittest.TestCase):
+    """A legacy count-less `__precoord` directory is a resume fallback."""
+
+    def _legacy_id(self, counted_id: str) -> str:
+        return counted_id[: -len("__precoord2")] + "__precoord"
+
+    def test_phase_on_adds_legacy_candidate(self) -> None:
+        spec = _spec(rounds=2, phase=True)
+        legacy = self._legacy_id(spec.run_id)
+        self.assertIn(legacy, spec.run_id_candidates)
+        # No canonical id equals the legacy one, so a rerun of a different
+        # treatment can never target the legacy directory.
+        self.assertNotEqual(spec.run_id, legacy)
+        self.assertNotIn(
+            legacy,
+            [_spec(rounds=1, phase=True).run_id, _spec(rounds=2, phase=True).run_id],
+        )
+
+    def test_phase_off_has_no_precoord_candidate(self) -> None:
+        spec = _spec(rounds=2, phase=False)
+        self.assertFalse(any(c.endswith("__precoord") for c in spec.run_id_candidates))
+        self.assertFalse(any("__precoord" in c for c in spec.run_id_candidates))
+
+    def test_legacy_directory_matched_when_count_agrees(self) -> None:
+        cfg = _cfg(rounds=2)
+        expected = list(resume_mod._iter_expected_run_specs(cfg))[0]
+        legacy_id = self._legacy_id(expected.run_id)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_run(
+                root,
+                legacy_id,
+                {
+                    "pre_coordination_round": True,
+                    "pre_coordination_rounds": 2,
+                    "pre_coordination_rounds_effective": 2,
+                },
+            )
+            incomplete, completed, total = resume_mod._select_incomplete_runs(
+                root=root, cfg=cfg
+            )
+            self.assertEqual(total, 1)
+            self.assertEqual(completed, 1)
+            self.assertEqual(incomplete, [])
+
+    def test_legacy_directory_not_matched_when_count_differs(self) -> None:
+        cfg = _cfg(rounds=2)
+        expected = list(resume_mod._iter_expected_run_specs(cfg))[0]
+        legacy_id = self._legacy_id(expected.run_id)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_run(
+                root,
+                legacy_id,
+                {
+                    "pre_coordination_round": True,
+                    "pre_coordination_rounds": 1,
+                    "pre_coordination_rounds_effective": 1,
+                },
+            )
             incomplete, completed, total = resume_mod._select_incomplete_runs(
                 root=root, cfg=cfg
             )
