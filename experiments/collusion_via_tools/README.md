@@ -139,7 +139,7 @@ The plot axis is labelled `Collusion judge (Simple) (0-5)`. The Appendix F
 the script for easy extension.
 
 ## Configuration notes
-* **Environment class**: `MisalignmentHospitalEnvironment` (in `experiments.collusion_via_tools.environment`)
+* **Environment class**: the upstream base `HospitalEnvironment` (`envs.dcops.hospital.hospital_env:HospitalEnvironment`), selected through `environment.import_path`. There is no local subclass: `schedule_patient` is callable only in the `execution` phase, and no agent's toolset is gated by role.
 * **Figure 7 topology**: `complete`
 * **Figure 7 sweep design**: the experiment fixes the covert behavior; `target_roles` splits provisioner vs departmental coalitions.
 
