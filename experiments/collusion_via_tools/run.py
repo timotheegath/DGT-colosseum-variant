@@ -275,6 +275,141 @@ def _resolve_pre_coordination_rounds_axis(
     return resolved
 
 
+# ---------------------------------------------------------------------------
+# Deterministic agent turn order
+# ---------------------------------------------------------------------------
+# The hospital job queue is filtered by SERVICE only, not by hospital
+# (``hospital_env.py:558-578``): every Triage agent sees all patients' step 0,
+# and the queue is rebuilt each turn as ``idx = len(done)``. The agent that acts
+# EARLIER therefore acts first in every iteration, so its cumulative quota
+# swallows the entire step. ``experiment.turn_order`` makes that ordering an
+# explicit, reproducible choice instead of an uncontrolled ``random.shuffle``.
+_TURN_ORDER_MODES: tuple = ("shuffled", "fixed", "seeded")
+
+
+def _resolve_turn_order(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Resolve ``experiment.turn_order`` to one of the allowed modes.
+
+    - ``"shuffled"`` (DEFAULT): ``random.shuffle(agents)`` on the global RNG,
+      reproducing the historical behaviour exactly.
+    - ``"fixed"``: one fixed, seed-independent permutation built from the
+      environment's own agent list (see ``_fixed_agent_order``).
+    - ``"seeded"``: ``random.Random(seed).shuffle(agents)``, so the order is a
+      pure function of the run seed and identical across every condition.
+
+    Any other value raises a ``ValueError`` naming the allowed modes.
+    """
+    exp_cfg = (cfg or {}).get("experiment") or {}
+    raw = exp_cfg.get("turn_order", "shuffled")
+    if raw is None:
+        return "shuffled"
+    value = str(raw).strip().lower()
+    if value not in _TURN_ORDER_MODES:
+        raise ValueError(
+            f"experiment.turn_order must be one of {_TURN_ORDER_MODES} (got {raw!r})"
+        )
+    return value
+
+
+def _service_order_from_env(env: Any) -> List[str]:
+    """Derive the service order from the environment's pathway templates.
+
+    Services are collected in first-seen order across ``possible_pathways`` so
+    the order follows the environment rather than being hard-coded.
+    """
+    services: List[str] = []
+    for pathway in getattr(env, "possible_pathways", []) or []:
+        for step in pathway or []:
+            try:
+                service = step[0]
+            except (TypeError, IndexError):
+                continue
+            if service and str(service) not in services:
+                services.append(str(service))
+    return services
+
+
+def _agent_service_hospital(env: Any, name: str) -> tuple:
+    """Return ``(service, hospital)`` for an agent from the env's own map.
+
+    Falls back to parsing the environment's ``"{hospital}_{service}"`` naming
+    (service names never contain ``_``) when the map does not carry the fields.
+    """
+    info = (getattr(env, "agents_map", {}) or {}).get(name) or {}
+    service = info.get("service")
+    hospital = info.get("hospital")
+    if service and hospital:
+        return str(service), str(hospital)
+    hospital_part, _, service_part = str(name).rpartition("_")
+    if service_part:
+        return service_part, hospital_part
+    return "", ""
+
+
+def _fixed_agent_order(env: Any, agent_names: Sequence[str]) -> List[str]:
+    """Build the deterministic ``turn_order="fixed"`` permutation.
+
+    1. ``Resource_Provisioner`` first, ahead of every department agent: its own
+       prompt mandates that its first planning action enforce the safe buffer
+       minimums, so it must top up inventory before any department schedules.
+    2. For each service in the environment's pathway order, emit that service's
+       agents, leading with the leading hospital's agent.
+    3. The leading hospital alternates by service index:
+       ``hospital_names[i % len(hospital_names)]``.
+
+    Why alternate: if a single hospital led every service, its four agents would
+    take every step in every seed while the OTHER hospital's four agents never
+    scheduled anything at all. That collapses the cooperative baseline and
+    dilutes the suspicion metric -- the signal the experiment relies on.
+    Alternating keeps both hospitals engaged.
+
+    Any agent not covered by the service/hospital pattern is appended once, in
+    sorted order, at the end.
+    """
+    names = [str(n) for n in agent_names]
+    name_set = set(names)
+    hospitals = [str(h) for h in (getattr(env, "hospital_names", []) or [])]
+    services = _service_order_from_env(env)
+
+    order: List[str] = []
+    if "Resource_Provisioner" in name_set:
+        order.append("Resource_Provisioner")
+
+    if hospitals and services:
+        for index, service in enumerate(services):
+            lead = hospitals[index % len(hospitals)]
+            ordered_hospitals = [lead] + [h for h in hospitals if h != lead]
+            for hospital in ordered_hospitals:
+                for name in names:
+                    if name in order:
+                        continue
+                    a_service, a_hospital = _agent_service_hospital(env, name)
+                    if a_service == service and a_hospital == hospital:
+                        order.append(name)
+
+    # Deterministic tail: any agent the pattern did not cover appears once.
+    for name in sorted(names):
+        if name not in order:
+            order.append(name)
+
+    return order
+
+
+def _ordered_agents(env: Any, agents: List[Any], mode: str, seed: int) -> List[Any]:
+    """Apply the resolved ``turn_order`` mode to ``agents`` (in place)."""
+    if mode == "shuffled":
+        random.shuffle(agents)
+        return agents
+    if mode == "seeded":
+        random.Random(int(seed)).shuffle(agents)
+        return agents
+    # "fixed": sort by the deterministic order (all names are covered).
+    order = _fixed_agent_order(env, [a.name for a in agents])
+    index = {name: i for i, name in enumerate(order)}
+    agents.sort(key=lambda a: index.get(a.name, len(order)))
+    return agents
+
+
 # Keys an adversary keeps in its context during the pre-coordination round.
 # This is an ALLOWLIST on purpose: `env.build_agent_context` returns whatever
 # the environment wants (for HospitalEnvironment that includes
@@ -1123,6 +1258,11 @@ async def _run_single(
     )
     set_post_message_disabled(resolved_disable_pm)
 
+    # Deterministic agent turn order (see `_resolve_turn_order`). Resolved here
+    # so an invalid `experiment.turn_order` fails before the run directory is
+    # created rather than mid-simulation.
+    resolved_turn_order = _resolve_turn_order(cfg)
+
     # --- PRE-COORDINATION PHASE ---
     # `pre_coordination_rounds` dedicated, planning-prompt-shaped rounds run
     # before the main simulation for adversaries only (default 1, for backward
@@ -1299,9 +1439,12 @@ async def _run_single(
                 prompt_recorder=prompt_recorder,
             )
         )
-    # Match examples/base_main.py behavior: shuffle agent execution order.
-    # HospitalEnvironment seeds the global RNG with simulation.seed in __init__.
-    random.shuffle(agents)
+    # Match examples/base_main.py behavior for the default mode: "shuffled"
+    # calls `random.shuffle(agents)` on the global RNG, which
+    # HospitalEnvironment seeds with simulation.seed in __init__. "fixed" and
+    # "seeded" replace it with a reproducible ordering (see `_ordered_agents`).
+    _ordered_agents(env, agents, resolved_turn_order, seed)
+    agent_order = [a.name for a in agents]
     env.set_agent_clients(agents)
 
     await env.async_init()
@@ -1731,6 +1874,8 @@ async def _run_single(
             "pre_coordination_rounds": resolved_pre_coord_rounds,
             "pre_coordination_rounds_effective": effective_pre_coord_rounds,
             "pre_coordination_max_messages": resolved_pre_coord_max,
+            "turn_order": resolved_turn_order,
+            "agent_order": agent_order,
             "roles": roles,
             "metrics": asdict(metrics),
         },
