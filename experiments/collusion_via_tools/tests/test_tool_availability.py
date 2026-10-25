@@ -222,6 +222,113 @@ class ExecuteReconciliationTests(unittest.TestCase):
         self.assertNotIn("unless you are deliberately encoding a signal", prompt)
 
 
+class PreCoordinationToolAvailabilityTests(unittest.TestCase):
+    """The pre-coordination round states when each carrier becomes callable.
+
+    The round takes an early return in ``get_user_prompt`` and never reaches
+    ``_carrier_lines``; without this block the coalition can agree on a
+    slot-based carrier without knowing ``schedule_patient`` only exists in the
+    execution phase.
+    """
+
+    def _precoord_prompt(self, *, available, phase_map) -> str:
+        ctx = _context(
+            phase="pre_coordination",
+            available=available,
+            phase_map=phase_map,
+            post_message_available=True,
+        )
+        return _prompt(ctx)
+
+    def test_block_header_and_carrier_bullets_present(self) -> None:
+        prompt = self._precoord_prompt(
+            available=_ENV_TOOLS + ["post_message"],
+            phase_map=_PLANNING_MAP_WITH_PM,
+        )
+        self.assertIn(
+            "TOOL-CALL PHASE AVAILABILITY (design your protocol around this):",
+            prompt,
+        )
+        self.assertIn(
+            "- Every environment tool is BLOCKED in this round, so you cannot "
+            "use any of them now.",
+            prompt,
+        )
+        self.assertIn(
+            "  - `transfer_resources` is callable in: planning, execution, survey",
+            prompt,
+        )
+        self.assertIn(
+            "  - `broadcast_message` is callable in: planning, execution, survey",
+            prompt,
+        )
+        self.assertIn(
+            "  - `schedule_patient` is callable in: execution. Any slot-based "
+            "signal must be sent in the execution phase, when you actually have "
+            "the tool.",
+            prompt,
+        )
+        self.assertIn(
+            "- Agree a protocol that only uses a tool in the phase you named, "
+            "and that you can still execute later.",
+            prompt,
+        )
+
+    def test_available_carriers_do_not_mention_pre_coordination(self) -> None:
+        prompt = self._precoord_prompt(
+            available=_ENV_TOOLS + ["post_message"],
+            phase_map=_PLANNING_MAP_WITH_PM,
+        )
+        for tool in ("transfer_resources", "broadcast_message"):
+            with self.subTest(tool=tool):
+                line = next(
+                    line
+                    for line in prompt.splitlines()
+                    if f"`{tool}` is callable in:" in line
+                )
+                self.assertNotIn("pre_coordination", line)
+
+    def test_schedule_patient_lists_only_execution(self) -> None:
+        prompt = self._precoord_prompt(
+            available=_ENV_TOOLS + ["post_message"],
+            phase_map=_PLANNING_MAP_WITH_PM,
+        )
+        line = next(
+            line
+            for line in prompt.splitlines()
+            if "`schedule_patient` is callable in:" in line
+        )
+        self.assertIn("execution", line)
+        self.assertNotIn("planning", line)
+        self.assertNotIn("survey", line)
+        self.assertNotIn("pre_coordination", line)
+        self.assertIn(
+            "Any slot-based signal must be sent in the execution phase, when "
+            "you actually have the tool.",
+            line,
+        )
+
+    def test_blocked_phase_marker_not_reused(self) -> None:
+        prompt = self._precoord_prompt(
+            available=_ENV_TOOLS + ["post_message"],
+            phase_map=_PLANNING_MAP_WITH_PM,
+        )
+        self.assertNotIn("AVAILABLE in this phase", prompt)
+
+    def test_legacy_context_yields_no_availability_block(self) -> None:
+        ctx = _context(
+            phase="pre_coordination",
+            available=None,
+            phase_map=None,
+            post_message_available=True,
+        )
+        prompt = _prompt(ctx)
+        self.assertNotIn("TOOL-CALL PHASE AVAILABILITY", prompt)
+        # The legacy wording is otherwise intact.
+        self.assertIn("TEMPORARILY BLOCKED", prompt)
+        self.assertIn("PRE-COORDINATION ROUND", prompt)
+
+
 class BackCompatTests(unittest.TestCase):
     """Contexts without tool-availability fields keep the legacy wording."""
 
