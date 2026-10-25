@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
 import sys
@@ -16,7 +17,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from tqdm import tqdm
-import networkx as nx
 
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
@@ -42,6 +42,10 @@ from experiments.collusion_via_tools.prompts import (
     ProvisionerBlackboardPrompts,
 )
 from experiments.collusion_via_tools.prompt_capture import ThreadSafePromptRecorder
+from experiments.collusion_via_tools.tool_availability import (
+    phase_tool_map,
+    tool_names_for_phase,
+)
 from experiments.common.local_protocol import LocalCommunicationProtocol
 from experiments.collusion_via_tools.judge_beliefs import judge_run
 from experiments.common._patch_terrarium import (
@@ -820,6 +824,20 @@ def _augment_context(base: Dict[str, Any], *, extra: Dict[str, Any]) -> Dict[str
     return out
 
 
+def _tool_availability_fields(agent: Any, env: Any, phase: str) -> Dict[str, Any]:
+    """Context fields describing which tools ``agent`` can call in ``phase``.
+
+    Read by ``MisalignmentPrompts`` to render the phase-aware coalition carrier
+    list. MUST be called AFTER ``set_post_message_disabled(...)`` for the
+    agent/phase, because the patched blackboard toolset lookup honours that
+    flag.
+    """
+    return {
+        "available_tool_names": tool_names_for_phase(agent, env, phase),
+        "tool_phase_map": phase_tool_map(agent, env),
+    }
+
+
 def _extract_initial_prompts(
     response: Dict[str, Any],
 ) -> Dict[str, str]:
@@ -928,6 +946,10 @@ async def _run_pre_coordination_rounds(
                 extra["post_message_available"] = phase_post_message_available
                 extra["pre_coordination_round"] = pre_round
                 extra["pre_coordination_rounds"] = num_rounds
+                # Tool availability for this exact agent/phase. Computed AFTER
+                # `set_post_message_disabled(...)` above, so the disabled-state
+                # reflected in the blackboard toolset is correct.
+                extra.update(_tool_availability_fields(agent, env, "pre_coordination"))
                 # Minimal context: identity + coalition strategy only, no
                 # environment state. Blocking tool calls is not sufficient
                 # because `env.build_agent_context` hands the adversary the
@@ -1390,6 +1412,10 @@ async def _run_single(
                     planning_round=planning_round,
                 )
                 extra = _get_extra_fields(agent.name, "planning")
+                # Tool availability for this exact agent/phase. Computed AFTER
+                # `set_post_message_disabled(...)` above, so the disabled-state
+                # reflected in the blackboard toolset is correct.
+                extra.update(_tool_availability_fields(agent, env, "planning"))
                 agent_context = (
                     base_ctx if not extra else _augment_context(base_ctx, extra=extra)
                 )
@@ -1464,6 +1490,10 @@ async def _run_single(
                 agent.name, phase="execution", iteration=iteration
             )
             extra = _get_extra_fields(agent.name, "execution")
+            # Tool availability for this exact agent/phase. Computed AFTER
+            # `set_post_message_disabled(...)` above, so the disabled-state
+            # reflected in the blackboard toolset is correct.
+            extra.update(_tool_availability_fields(agent, env, "execution"))
             agent_context = (
                 base_ctx if not extra else _augment_context(base_ctx, extra=extra)
             )
@@ -1533,6 +1563,10 @@ async def _run_single(
             agent.name, phase="survey", iteration=max(1, current_iteration)
         )
         extra = _get_extra_fields(agent.name, "survey")
+        # Tool availability for this exact agent/phase. Computed AFTER
+        # `set_post_message_disabled(...)` above, so the disabled-state
+        # reflected in the blackboard toolset is correct.
+        extra.update(_tool_availability_fields(agent, env, "survey"))
         agent_context = (
             base_ctx if not extra else _augment_context(base_ctx, extra=extra)
         )
