@@ -78,6 +78,7 @@ import os
 import re
 import statistics
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -319,6 +320,87 @@ class Agg:
 class GroupMetrics:
     n_runs: int
     aggregates: dict[str, Agg] = field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------- #
+# Baseline coalition inference
+# --------------------------------------------------------------------------- #
+#
+# A benign-baseline run (``adversary_count == 0``) carries no coalition
+# fields. To make Table C's paired-by-seed delta against such a baseline
+# work for the headline coalition metrics (``coalition_minus_noncoalition_avg``,
+# ``coalition_reward_regret``), we augment baseline runs in memory with a
+# counterfactual coalition built from the names of the colluders in the
+# non-baseline sweeps. See ``aggregate_protocols`` for the math; this is
+# the same pipeline the delta plot script uses, and it is in-memory only
+# (no ``metrics.json`` on disk is touched).
+#
+# The import is wrapped in a small retry helper so a concurrently-edited
+# ``aggregate_protocols.py`` cannot crash this script's CLI.
+
+
+_AGG_PROTOCOLS_IMPORT_RETRIES = 5
+_AGG_PROTOCOLS_IMPORT_DELAY = 30  # seconds
+
+
+def _import_aggregate_protocols() -> Any:
+    """Import :mod:`aggregate_protocols` for the baseline coalition helpers.
+
+    Retries on transient ``ImportError`` / ``SyntaxError`` so a partially-
+    written ``aggregate_protocols.py`` (e.g. being edited by another
+    process) cannot crash this script. Never mutates the sibling module
+    to work around a failure.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(_AGG_PROTOCOLS_IMPORT_RETRIES):
+        try:
+            try:
+                from . import aggregate_protocols as module
+            except ImportError:
+                import importlib
+
+                repo_root = os.path.dirname(
+                    os.path.dirname(
+                        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    )
+                )
+                if repo_root not in sys.path:
+                    sys.path.insert(0, repo_root)
+                module = importlib.import_module(
+                    "experiments.collusion_via_tools.analysis.aggregate_protocols"
+                )
+            if not hasattr(module, "augment_runs_with_baseline_coalition"):
+                raise ImportError(
+                    "aggregate_protocols is missing augment_runs_with_baseline_coalition"
+                )
+            return module
+        except (ImportError, SyntaxError) as exc:
+            last_exc = exc
+            if attempt < _AGG_PROTOCOLS_IMPORT_RETRIES - 1:
+                print(
+                    "warning: transient import failure of aggregate_protocols "
+                    f"({exc!r}); retrying in {_AGG_PROTOCOLS_IMPORT_DELAY}s "
+                    f"({attempt + 1}/{_AGG_PROTOCOLS_IMPORT_RETRIES})",
+                    file=sys.stderr,
+                )
+                time.sleep(_AGG_PROTOCOLS_IMPORT_DELAY)
+    raise ImportError(
+        f"could not import aggregate_protocols after {_AGG_PROTOCOLS_IMPORT_RETRIES} attempts"
+    ) from last_exc
+
+
+_augment_runs_with_baseline_coalition: Any = None
+
+
+def _ensure_baseline_coalition_helpers() -> Any:
+    """Lazy-import the augmentation helper so the import cost is paid once."""
+    global _augment_runs_with_baseline_coalition
+    if _augment_runs_with_baseline_coalition is None:
+        module = _import_aggregate_protocols()
+        _augment_runs_with_baseline_coalition = (
+            module.augment_runs_with_baseline_coalition
+        )
+    return _augment_runs_with_baseline_coalition
 
 
 # --------------------------------------------------------------------------- #
@@ -1486,6 +1568,19 @@ def main(argv: list[str] | None = None) -> int:
         runs, args.exclude_error_runs, args.exclude_failed_runs
     )
     excluded_runs.sort(key=_excluded_sort_key)
+
+    # Augment any benign-baseline runs (``adversary_count == 0``) with the
+    # counterfactual coalition metrics so Table C's paired-by-seed delta
+    # against the baseline resolves for the coalition-aware columns
+    # (``coalition_minus_noncoalition_avg``, ``coalition_reward_regret``).
+    # In-memory only; no ``metrics.json`` is mutated.
+    augment = _ensure_baseline_coalition_helpers()
+    inferred_colluders = augment(kept_runs)
+    if inferred_colluders:
+        print(
+            f"baseline coalition inferred from non-baseline sweeps: "
+            f"{sorted(inferred_colluders)}"
+        )
 
     # Totals per (model, sweep) over everything on disk, so Table A can show
     # how many runs were aggregated versus how many exist.
