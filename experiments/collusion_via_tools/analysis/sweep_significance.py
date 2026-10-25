@@ -684,88 +684,15 @@ def run_delta_mode(delta_csv: Path, out_dir: Path) -> None:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="sweep_significance",
-        description=(
-            "Significance analysis for sweep metrics. Three modes:\n\n"
-            "  * --summary-csv (default): reads sweep_metrics_stats.csv and runs\n"
-            "    Welch's omnibus + pairwise t with Holm-Bonferroni on the\n"
-            "    per-(sweep, metric) summary stats.\n"
-            "  * --delta-csv PATH: reads a per-run paired-delta CSV (one row\n"
-            "    per (model, sweep, seed)) and runs one-sample and paired\n"
-            "    tests on it.\n"
-            "  * --reference SWEEP (positional <root>...): loads runs from\n"
-            "    one or more output roots, augments baseline runs, computes\n"
-            "    the paired deltas itself, writes the per-run CSV next to\n"
-            "    --out, and runs the same one-sample + paired tests. This\n"
-            "    is the one-step workflow -- it makes --delta-csv optional."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    """Deprecated — forwards to :func:`tables.parse_args`."""
+    print(
+        "warning: sweep_significance._parse_args is deprecated; use "
+        "`python -m experiments.collusion_via_tools.analysis.tables` instead",
+        file=sys.stderr,
     )
-    parser.add_argument(
-        "root",
-        nargs="*",
-        default=None,
-        help=(
-            "One or more experiment output roots. Required when --reference "
-            "is set; ignored otherwise."
-        ),
-    )
-    parser.add_argument(
-        "--root",
-        dest="root_opt",
-        action="append",
-        default=None,
-        help="Alternative (repeatable) way to pass an output root.",
-    )
-    parser.add_argument(
-        "--reference",
-        dest="reference",
-        default=None,
-        help=(
-            "Reference sweep name. Combined with --root, switches to the "
-            "one-step root mode (computes deltas inline)."
-        ),
-    )
-    parser.add_argument(
-        "--out",
-        dest="out",
-        default=None,
-        help=(
-            "Output directory (root mode only; default: "
-            "<package>/plots_outputs/judge_vs_advantage_delta). The per-run "
-            "delta CSV and the significance outputs are written here."
-        ),
-    )
-    parser.add_argument(
-        "--summary-csv",
-        dest="summary_csv",
-        default=str(STATS_CSV),
-        help="Summary-stats CSV (default: %(default)s). Used unless --delta-csv or --root is set.",
-    )
-    parser.add_argument(
-        "--delta-csv",
-        dest="delta_csv",
-        default=None,
-        help=(
-            "Per-run paired-delta CSV emitted by plot_judge_vs_advantage_delta. "
-            "When set, switches to per-run-delta mode and writes "
-            "sweep_significance_delta.{csv,md} next to the input."
-        ),
-    )
-    parser.add_argument(
-        "--exclude-error-runs",
-        dest="exclude_error_runs",
-        action="store_true",
-        help="Drop every run with a failed agent turn (strict rule; root mode only).",
-    )
-    parser.add_argument(
-        "--exclude-failed-runs",
-        dest="exclude_failed_runs",
-        action="store_true",
-        help="Drop only collapsed runs (failed turn + no assignment; root mode only).",
-    )
-    return parser.parse_args(argv)
+    from .tables import parse_args as _tables_parse_args
+
+    return _tables_parse_args(argv)
 
 
 # --------------------------------------------------------------------------- #
@@ -943,266 +870,35 @@ def run_root_delta_mode(
     run_delta_mode(points_csv, out_dir)
 
 
-def main() -> None:
-    args = _parse_args()
+def main(argv: list[str] | None = None) -> int:
+    """Deprecated shim -- see ``tables.py``.
 
-    # Root mode: --reference set, with optional positional / --root roots.
-    if args.reference:
-        roots = list(args.root or []) + list(args.root_opt or [])
-        out_dir = (
-            Path(args.out)
-            if args.out
-            else Path(__file__).resolve().parent
-            / "plots_outputs"
-            / "judge_vs_advantage_delta"
-        )
-        run_root_delta_mode(
-            roots,
-            args.reference,
-            out_dir,
-            args.exclude_error_runs,
-            args.exclude_failed_runs,
-        )
-        return
-
-    if args.delta_csv:
-        delta_csv = Path(args.delta_csv)
-        if not delta_csv.exists():
-            raise SystemExit(f"Delta CSV not found: {delta_csv}")
-        out_dir = delta_csv.parent
-        run_delta_mode(delta_csv, out_dir)
-        return
-
-    summary_csv = Path(args.summary_csv)
-    if not summary_csv.exists():
-        raise SystemExit(f"Summary CSV not found: {summary_csv}")
-    cells = load_cells(summary_csv)
-    if not cells:
-        raise SystemExit(f"No data loaded from {summary_csv}")
-
-    sweeps_by_metric: dict[str, list[str]] = {}
-    for (sweep, metric), cell in cells.items():
-        if cell.is_valid():
-            sweeps_by_metric.setdefault(metric, []).append(sweep)
-
-    # Omnibus: Welch's one-way ANOVA per metric ("does sweep config matter at all
-    # for this metric?"). With n=9-10 per cell this is the more useful question
-    # than the all-pairs family.
-    omnibus: dict[str, dict[str, object]] = {}
-    for metric in METRIC_ORDER:
-        available = sorted(set(sweeps_by_metric.get(metric, [])))
-        if len(available) < 2:
-            continue
-        groups = [cells[(s, metric)] for s in available]
-        f_stat, p_val = omnibus_welch_anova(groups)
-        omnibus[metric] = {
-            "metric": metric,
-            "metric_label": groups[0].label,
-            "k": len(groups),
-            "min_n": min(g.n for g in groups),
-            "max_n": max(g.n for g in groups),
-            "F": f_stat,
-            "p_value": p_val,
-        }
-
-    # Build all-pairs rows, then Holm-Bonferroni within each metric.
-    rows: list[dict[str, object]] = []
-    for metric in METRIC_ORDER:
-        available = sorted(set(sweeps_by_metric.get(metric, [])))
-        if not available:
-            continue
-        ordered = ordered_metric_sweeps(metric, available)
-        pairs = all_pairs(ordered)
-        raw_pvals: list[float] = []
-        pair_records: list[dict[str, object]] = []
-        for a, b in pairs:
-            ca = cells[(a, metric)]
-            cb = cells[(b, metric)]
-            t, df, p = welch_t_from_summary(
-                ca.mean, cb.mean, ca.std, cb.std, ca.n, cb.n
-            )
-            ci_lo, ci_hi, _ = mean_diff_ci(ca.mean, cb.mean, ca.std, cb.std, ca.n, cb.n)
-            g_lo, g_hi = hedges_g_ci(ca.mean, cb.mean, ca.std, cb.std, ca.n, cb.n)
-            s_pool = math.sqrt(
-                ((ca.n - 1) * ca.std**2 + (cb.n - 1) * cb.std**2) / (ca.n + cb.n - 2)
-            )
-            d = (ca.mean - cb.mean) / s_pool if s_pool > 0 else float("nan")
-            g = hedges_correction(d, ca.n, cb.n) if s_pool > 0 else float("nan")
-            record = {
-                "metric": metric,
-                "metric_label": ca.label,
-                "sweep_a": a,
-                "sweep_b": b,
-                "n_a": ca.n,
-                "n_b": cb.n,
-                "mean_a": ca.mean,
-                "mean_b": cb.mean,
-                "mean_diff": ca.mean - cb.mean,
-                "mean_diff_ci95_lo": ci_lo,
-                "mean_diff_ci95_hi": ci_hi,
-                "cohens_d": d,
-                "hedges_g": g,
-                "hedges_g_ci95_lo": g_lo,
-                "hedges_g_ci95_hi": g_hi,
-                "t": t,
-                "df": df,
-                "p_value": p,
-            }
-            pair_records.append(record)
-            raw_pvals.append(p)
-        adjusted = holm_bonferroni(raw_pvals)
-        for rec, p_adj in zip(pair_records, adjusted):
-            rec["p_holm"] = p_adj
-            rec["significant_05"] = bool(p_adj < 0.05)
-            rows.append(rec)
-
-    # Write CSV.
-    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = list(rows[0].keys()) if rows else []
-    with OUT_CSV.open("w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-    print(f"Wrote {OUT_CSV}")
-
-    # Write a compact Markdown summary, grouped by metric.
-    lines: list[str] = []
-    lines.append(
-        "# Sweep significance (Welch's omnibus + pairwise t, Holm-Bonferroni per metric)"
+    The legacy three-mode behaviour is selected automatically by
+    ``tables._resolve_significance_mode`` (``--delta-csv`` -> delta,
+    ``--reference`` -> root, ``--summary-csv`` / default stats CSV -> summary).
+    """
+    print(
+        "warning: sweep_significance.main is deprecated; use "
+        "`python -m experiments.collusion_via_tools.analysis.tables` "
+        "with --significance-mode {summary,delta,root}",
+        file=sys.stderr,
     )
-    lines.append("")
-    lines.append(
-        "Computed from `sweep_metrics_stats.csv` (n=9-10 per cell). "
-        "`mean_diff` is (sweep_a − sweep_b). `hedges_g` is Cohen's d with the "
-        "Hedges small-sample correction; |g| < 0.2 is negligible, ~0.5 medium, "
-        "~0.8 large. **p_holm** is the Holm-Bonferroni adjusted p-value within "
-        "the metric (more powerful than plain Bonferroni). "
-        "`significant_05` = `True` iff `p_holm < 0.05`."
-    )
-    lines.append("")
-    lines.append(
-        "**Headline:** at α=0.05, **no pairwise comparison survives Holm-Bonferroni**. "
-        "n=9-10 per cell is too small for the observed within-cell variance -- "
-        "the Welch omnibus test (below) is a more useful summary."
-    )
-    lines.append("")
-    lines.append("## Omnibus: Welch's one-way ANOVA per metric")
-    lines.append("")
-    lines.append("| metric | k groups | n range | F | p | sig @ .05 |")
-    lines.append("|---|---|---|---|---|---|")
-    for metric in METRIC_ORDER:
-        rec = omnibus.get(metric)
-        if not rec:
-            continue
-        sig = "✅" if float(rec["p_value"]) < 0.05 else "—"
-        lines.append(
-            "| " + f"{metric} — {rec['metric_label']} | {rec['k']} | "
-            f"{rec['min_n']}–{rec['max_n']} | "
-            f"{_fmt(rec['F'], 2)} | {_fmt_p(rec['p_value'])} | {sig} |"
-        )
-    lines.append("")
-    lines.append("## Pairwise: Welch's t with Holm-Bonferroni correction")
-    lines.append("")
-    # Highlight the largest unadjusted effect sizes (raw p smallest and
-    # |Hedges' g| largest), so the reader can see what the data is hinting at
-    # even though nothing survives correction.
-    raw_rows = [r for r in rows if math.isfinite(float(r["hedges_g"]))]  # type: ignore[arg-type]
-    by_abs_g = sorted(raw_rows, key=lambda r: -abs(float(r["hedges_g"])))[:5]  # type: ignore[arg-type]
-    by_pval = sorted(raw_rows, key=lambda r: float(r["p_value"]))[:5]  # type: ignore[arg-type]
-    lines.append("**Top 5 by |Hedges' g|** (largest standardised mean diffs):")
-    lines.append("")
-    lines.append(
-        "| metric | sweep A | sweep B | mean diff | Hedges' g | 95% CI on g | raw p | p (Holm) |"
-    )
-    lines.append("|---|---|---|---|---|---|---|---|")
-    for r in by_abs_g:
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    str(r["metric"]),
-                    str(r["sweep_a"]),
-                    str(r["sweep_b"]),
-                    _fmt(r["mean_diff"]),
-                    _fmt(r["hedges_g"]),
-                    f"({_fmt(r['hedges_g_ci95_lo'])}, {_fmt(r['hedges_g_ci95_hi'])})",
-                    _fmt_p(r["p_value"]),
-                    _fmt_p(r["p_holm"]),
-                ]
-            )
-            + " |"
-        )
-    lines.append("")
-    lines.append("**Top 5 by raw p** (smallest unadjusted p-values):")
-    lines.append("")
-    lines.append(
-        "| metric | sweep A | sweep B | mean diff | Hedges' g | raw p | p (Holm) |"
-    )
-    lines.append("|---|---|---|---|---|---|---|")
-    for r in by_pval:
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    str(r["metric"]),
-                    str(r["sweep_a"]),
-                    str(r["sweep_b"]),
-                    _fmt(r["mean_diff"]),
-                    _fmt(r["hedges_g"]),
-                    _fmt_p(r["p_value"]),
-                    _fmt_p(r["p_holm"]),
-                ]
-            )
-            + " |"
-        )
-    lines.append("")
-    by_metric: dict[str, list[dict[str, object]]] = {}
-    for r in rows:
-        by_metric.setdefault(str(r["metric"]), []).append(r)
-    for metric in METRIC_ORDER:
-        recs = by_metric.get(metric, [])
-        if not recs:
-            continue
-        first = recs[0]
-        lines.append(f"## {metric} — {first['metric_label']}")
-        lines.append("")
-        lines.append(
-            "| sweep A | sweep B | n_A | n_B | mean A | mean B | mean diff | "
-            "95% CI on diff | Cohen's d | Hedges' g | 95% CI on g | t | df | "
-            "p (raw) | p (Holm) | sig @ .05 |"
-        )
-        lines.append(
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
-        )
-        for r in recs:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        str(r["sweep_a"]),
-                        str(r["sweep_b"]),
-                        str(r["n_a"]),
-                        str(r["n_b"]),
-                        _fmt(r["mean_a"]),
-                        _fmt(r["mean_b"]),
-                        _fmt(r["mean_diff"]),
-                        f"({_fmt(r['mean_diff_ci95_lo'])}, {_fmt(r['mean_diff_ci95_hi'])})",
-                        _fmt(r["cohens_d"]),
-                        _fmt(r["hedges_g"]),
-                        f"({_fmt(r['hedges_g_ci95_lo'])}, {_fmt(r['hedges_g_ci95_hi'])})",
-                        _fmt(r["t"], 2),
-                        _fmt(r["df"], 1),
-                        _fmt_p(r["p_value"]),
-                        _fmt_p(r["p_holm"]),
-                        "✅" if r["significant_05"] else "—",
-                    ]
-                )
-                + " |"
-            )
-        lines.append("")
-    OUT_MD.write_text("\n".join(lines))
-    print(f"Wrote {OUT_MD}")
+    from .tables import main as _tables_main
+    from .tables import parse_args as _tables_parse_args
+
+    forwarded = list(sys.argv[1:] if argv is None else argv)
+    # A legacy bare invocation (no root, no --reference, no --delta-csv)
+    # defaulted to summary-stats mode on the package stats CSV; make that
+    # explicit so the consolidated entry point does not demand a root.
+    try:
+        ns = _tables_parse_args(forwarded)
+    except SystemExit:
+        ns = None
+    if ns is not None and not (
+        ns.root or ns.root_opt or ns.reference or ns.delta_csv or ns.summary_csv
+    ):
+        forwarded += ["--summary-csv", str(STATS_CSV)]
+    return _tables_main(forwarded)
 
 
 def _fmt(v: object, decimals: int = 3) -> str:
@@ -1222,4 +918,4 @@ def _fmt_p(p: object) -> str:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

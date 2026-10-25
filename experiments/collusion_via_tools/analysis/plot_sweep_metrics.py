@@ -852,80 +852,15 @@ def write_stats_json(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="plot_sweep_metrics",
-        description="Plot headline metric distributions per sweep (hybrid box + "
-        "points + mean/std by default).",
+    """Deprecated — forwards to :func:`plots.parse_args`."""
+    print(
+        "warning: plot_sweep_metrics.parse_args is deprecated; use "
+        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
+        file=sys.stderr,
     )
-    parser.add_argument(
-        "root", nargs="*", default=None, help="One or more experiment output roots."
-    )
-    parser.add_argument(
-        "--root",
-        dest="root_opt",
-        action="append",
-        default=None,
-        help="Alternative (repeatable) way to pass a root.",
-    )
-    parser.add_argument("--out", dest="out", default=None, help="Output directory.")
-    parser.add_argument(
-        "--metrics", dest="metrics", default=None, help="Comma-separated metric subset."
-    )
-    parser.add_argument(
-        "--style",
-        dest="style",
-        choices=("box", "dot"),
-        default="box",
-        help="Panel style (default box).",
-    )
-    parser.add_argument(
-        "--annotate",
-        dest="annotate",
-        choices=("mean", "none"),
-        default="mean",
-        help="Per-box annotation (default mean).",
-    )
-    parser.add_argument(
-        "--exclude-error-runs",
-        dest="exclude_error_runs",
-        action="store_true",
-        help="Drop every run with a failed agent turn (strict rule).",
-    )
-    parser.add_argument(
-        "--exclude-failed-runs",
-        dest="exclude_failed_runs",
-        action="store_true",
-        help="Drop only collapsed runs (failed turn + no assignment).",
-    )
-    parser.add_argument(
-        "--split",
-        dest="split",
-        action="store_true",
-        help="Also write one PNG per metric.",
-    )
-    parser.add_argument(
-        "--order",
-        dest="order",
-        default=None,
-        help="Explicit comma-separated sweep order.",
-    )
-    parser.add_argument(
-        "--csv", dest="csv_path", default=None, help="Write the plotted stats here."
-    )
-    parser.add_argument(
-        "--json",
-        dest="json_path",
-        default=None,
-        help="Write the stats (plus excluded-run metadata) as JSON.",
-    )
-    parser.add_argument(
-        "--dpi",
-        dest="dpi",
-        type=int,
-        default=300,
-        help="Raster resolution (default 300).",
-    )
-    return parser.parse_args(argv)
+    from .plots import parse_args as _plots_parse_args
+
+    return _plots_parse_args(argv)
 
 
 def default_out_dir() -> str:
@@ -935,193 +870,17 @@ def default_out_dir() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-
-    roots = list(args.root or []) + list(args.root_opt or [])
-    if not roots:
-        print("error: a root path is required (positional or --root)", file=sys.stderr)
-        return 2
-
-    roots_abs = [os.path.abspath(root) for root in roots]
-    missing = [root for root in roots_abs if not os.path.exists(root)]
-    if missing:
-        for root in missing:
-            print(f"error: path does not exist: {root}", file=sys.stderr)
-        return 2
-
-    if args.metrics:
-        specs = list(resolve_metrics(args.metrics))
-    else:
-        specs = [METRICS_BY_KEY[key] for key in DEFAULT_METRIC_KEYS]
-    if not specs:
-        print("error: no valid metrics selected", file=sys.stderr)
-        return 2
-
-    runs: list[Any] = []
-    for root_abs in roots_abs:
-        found = find_metric_files(root_abs)
-        runs.extend(load_runs(root_abs, found))
-    if not runs:
-        print("warning: no usable runs found", file=sys.stderr)
-        return 0
-
-    runs_used = len(runs)
-    kept_runs, excluded_pairs = partition_runs(
-        runs, args.exclude_error_runs, args.exclude_failed_runs
+    """Deprecated shim — see ``plots.py``."""
+    print(
+        "warning: plot_sweep_metrics.main is deprecated; use "
+        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
+        file=sys.stderr,
     )
-    excluded_pairs.sort(key=excluded_sort_key)
+    from .plots import main as _plots_main
 
-    # Summary wording mirrors sweep_metrics_table.py exactly.
-    if args.exclude_error_runs and args.exclude_failed_runs:
-        summary_header = "excluded runs"
-        excluded_noun = "run"
-    elif args.exclude_failed_runs:
-        summary_header = "excluded failed runs"
-        excluded_noun = "failed run"
-    else:
-        summary_header = "excluded error runs"
-        excluded_noun = "error turn"
-
-    if excluded_pairs:
-        print(f"{summary_header}: {len(excluded_pairs)} of {runs_used}")
-        for run, agents in excluded_pairs:
-            seed = run.seed()
-            seed_cell = f"seed{seed}" if seed is not None else "-"
-            agents_cell = f"[{', '.join(agents)}]" if agents else "-"
-            line = f"  {run.sweep}  {seed_cell}  {agents_cell}"
-            if args.exclude_failed_runs:
-                line += f"  ({exclusion_reason(run, True)})"
-            print(line)
-
-    if not kept_runs:
-        print(
-            "warning: no usable runs left after excluding runs",
-            file=sys.stderr,
-        )
-        return 0
-
-    excluded_by_model: dict[str, int] = {}
-    for run, _agents in excluded_pairs:
-        excluded_by_model[run.model] = excluded_by_model.get(run.model, 0) + 1
-
-    excluded_records = [
-        {
-            "model": run.model,
-            "sweep": run.sweep,
-            "seed": run.seed(),
-            "run_id": run.run_id,
-            "agents": list(agents),
-            "reason": exclusion_reason(run, args.exclude_failed_runs),
-        }
-        for run, agents in excluded_pairs
-    ]
-
-    grouped = group_runs(kept_runs)
-    models = sorted(grouped)
-    order = [token.strip() for token in (args.order or "").split(",") if token.strip()]
-
-    values_by_model: dict[str, dict[str, dict[str, list[float]]]] = {}
-    run_counts_by_model: dict[str, dict[str, int]] = {}
-    records: list[dict[str, Any]] = []
-    for model in models:
-        buckets = grouped[model]
-        sweeps = order_sweeps(sorted(buckets), order)
-        run_counts_by_model[model] = {sweep: len(buckets[sweep]) for sweep in sweeps}
-        per_metric: dict[str, dict[str, list[float]]] = {}
-        for spec in specs:
-            per_metric[spec.key] = {}
-            for sweep in sweeps:
-                values: list[float] = []
-                for run in buckets[sweep]:
-                    value = spec.getter(run.metrics, run.run_config, run.costs)
-                    if value is not None:
-                        values.append(float(value))
-                # Rate metrics are plotted as percent so the axis, the "%" label
-                # and the annotations agree; the stats below keep the raw fraction.
-                if spec.fmt == "rate":
-                    per_metric[spec.key][sweep] = [v * 100.0 for v in values]
-                else:
-                    per_metric[spec.key][sweep] = values
-                stats = compute_stats(values)
-                records.append(
-                    {
-                        "model": model,
-                        "sweep": sweep,
-                        "metric": spec.key,
-                        "label": spec.label,
-                        "n": stats.n,
-                        "min": stats.min,
-                        "q1": stats.q1,
-                        "median": stats.median,
-                        "mean": stats.mean,
-                        "std": stats.std,
-                        "max": stats.max,
-                    }
-                )
-        values_by_model[model] = per_metric
-
-    for spec in specs:
-        if all(
-            not values_by_model[model][spec.key][sweep]
-            for model in models
-            for sweep in values_by_model[model][spec.key]
-        ):
-            print(
-                f"warning: metric '{spec.key}' has no values for any sweep",
-                file=sys.stderr,
-            )
-
-    out_dir = args.out or default_out_dir()
-    os.makedirs(out_dir, exist_ok=True)
-    multi = len(models) > 1
-
-    written: list[str] = []
-    for model in models:
-        sweeps = order_sweeps(sorted(grouped[model]), order)
-        fig = render_model_figure(
-            model,
-            sweeps,
-            values_by_model[model],
-            specs,
-            args.style,
-            args.annotate,
-            run_counts_by_model[model],
-            excluded_by_model.get(model, 0),
-            excluded_noun,
-        )
-        base = "sweep_metrics" + (f"_{slugify(model)}" if multi else "")
-        png_path = os.path.join(out_dir, base + ".png")
-        pdf_path = os.path.join(out_dir, base + ".pdf")
-        save_figure(fig, png_path, args.dpi)
-        save_figure(fig, pdf_path, args.dpi)
-        written.extend([png_path, pdf_path])
-
-        if args.split:
-            for spec in specs:
-                split_fig = render_split_figure(
-                    model,
-                    sweeps,
-                    spec,
-                    values_by_model[model][spec.key],
-                    args.style,
-                    args.annotate,
-                )
-                split_path = os.path.join(out_dir, base + f"_{spec.key}.png")
-                save_figure(split_fig, split_path, args.dpi)
-                written.append(split_path)
-
-    csv_path = args.csv_path or os.path.join(out_dir, "sweep_metrics_stats.csv")
-    write_stats_csv(csv_path, records)
-    written.append(csv_path)
-
-    if args.json_path:
-        write_stats_json(args.json_path, records, excluded_records)
-        written.append(args.json_path)
-
-    print("Wrote:")
-    for path in written:
-        print(f"  {os.path.abspath(path)}")
-    return 0
+    forwarded = list(sys.argv[1:] if argv is None else argv)
+    forwarded += ["--legacy-mode", "box"]
+    return _plots_main(forwarded)
 
 
 if __name__ == "__main__":

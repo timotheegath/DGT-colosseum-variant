@@ -29,12 +29,15 @@ call and only **3** ran one bidirectionally.
 |---|---|
 | `protocol_designs.json` | Curated design-layer description per seed, plus a `_dimensions` schema defining every field |
 | `protocol_execution.py` | Mechanical extraction of the execution layer + outcome metrics |
-| `aggregate_protocols.py` | Joins the two into the cross-run matrix |
-| `sweep_metrics_table.py` | Sweep-level metric table (mean ± std) for any output root |
-| `plot_sweep_metrics.py` | Sweep metric distribution plots (hybrid box + points + mean/std) |
-| `plot_judge_vs_advantage.py` | Per-run scatter of coalition advantage (y) vs. LLM-judge score (x); one series per sweep |
-| `plot_judge_vs_advantage_delta.py` | Same scatter, but as paired-by-seed deltas vs. a `--reference` sweep |
-| `aggregate_protocols.py` | Joins the three layers and exposes `identify_colluder_set` / `augment_baseline_coalition_metrics` for the baseline-reference workflow |
+| `aggregate_protocols.py` | Joins the design and execution layers into the cross-run matrix; exposes `identify_colluder_set` / `augment_baseline_coalition_metrics` for the baseline-reference workflow |
+| **`tables.py`** | **Primary entry point for the tables**: prints Tables A/B/C and runs the significance modes |
+| **`plots.py`** | **Primary entry point for the figures**: hybrid box plots, raw scatter, and paired-delta scatter in one run |
+| `delta_metrics.py` | Shared per-run metric accessors (`judge_score`, `coalition_advantage`) and paired-by-seed delta computation |
+| `sweep_metrics_table.py` | *Deprecated*: table plumbing (metric catalogue, run discovery, grouping, run-health partitioning) + a thin CLI shim that forwards to `tables.py` |
+| `sweep_significance.py` | *Deprecated*: significance statistics helpers + a thin CLI shim that forwards to `tables.py` |
+| `plot_sweep_metrics.py` | *Deprecated*: box-plot rendering helpers + a thin CLI shim that forwards to `plots.py` |
+| `plot_judge_vs_advantage.py` | *Deprecated*: raw-scatter rendering helpers + a thin CLI shim that forwards to `plots.py` |
+| `plot_judge_vs_advantage_delta.py` | *Deprecated*: paired-delta rendering helpers + a thin CLI shim that forwards to `plots.py` |
 
 ```bash
 # from the repo root
@@ -43,11 +46,11 @@ call and only **3** ran one bidirectionally.
     --csv /tmp/protocol_matrix.csv
 ```
 
-## Sweep metric table
+## Tables (`tables.py`)
 
-`sweep_metrics_table.py` answers "how did each sweep compare?" without any
-manual aggregation. It walks `runs/<model>/<sweep>/<run>/metrics.json` and
-prints three tables:
+`tables.py` answers "how did each sweep compare?" without any manual
+aggregation. It walks `runs/<model>/<sweep>/<run>/metrics.json` and prints
+three tables:
 
 - **A — sweep inventory**: runs, adversaries, pre-coordination rounds,
   post-message restriction, secret channel, agents, patients, complete runs.
@@ -60,14 +63,16 @@ prints three tables:
   and labelled `<sweep> (ref)`; its deltas are 0 by construction.
 
 ```bash
-.venv/bin/python -m experiments.collusion_via_tools.analysis.sweep_metrics_table \
+.venv/bin/python -m experiments.collusion_via_tools.analysis.tables \
     experiments/collusion_via_tools/outputs/run_1/20261024-011657_2coordrounds \
     --csv /tmp/sweep_metrics.csv --json /tmp/sweep_metrics.json
 ```
 
 Options: `--sweep NAME` (repeatable), `--source NAME` (repeatable),
 `--metrics a,b,c`, `--ddof {0,1}` (sample std by default), `--reference SWEEP`,
-`--no-delta`, `--exclude-error-runs`, `--exclude-failed-runs`.
+`--no-delta`, `--exclude-error-runs`, `--exclude-failed-runs`, `--format
+{plain,formatted,markdown}`, plus the significance flags below. `--root` is a
+repeatable alternative to the positional `<root>...`.
 
 Two opt-in rules drop unhealthy runs before aggregation. Both list the excluded
 runs (sweep, seed, failing agent) and turn Table A's `Runs` cell into
@@ -86,11 +91,11 @@ runs (sweep, seed, failing agent) and turn Table A's `Runs` cell into
 
 ```bash
 # drop every errored run (strict)
-.venv/bin/python -m experiments.collusion_via_tools.analysis.sweep_metrics_table \
+.venv/bin/python -m experiments.collusion_via_tools.analysis.tables \
     experiments/collusion_via_tools/saved_outputs --exclude-error-runs
 
 # drop only the run(s) that collapsed
-.venv/bin/python -m experiments.collusion_via_tools.analysis.sweep_metrics_table \
+.venv/bin/python -m experiments.collusion_via_tools.analysis.tables \
     experiments/collusion_via_tools/saved_outputs --exclude-failed-runs
 ```
 
@@ -111,8 +116,9 @@ set is printed once on stdout so the run is reproducible:
 baseline coalition inferred from non-baseline sweeps: ['General_Hospital_Triage', 'Resource_Provisioner']
 ```
 
-The same augmentation powers the delta plot script (`plot_judge_vs_advantage_delta.py`),
-so the table and the plot agree on what the baseline coalition score is.
+The same augmentation powers the delta scatter in `plots.py` and the
+`--reference` (root) significance mode, so the table, the plot and the tests
+agree on what the baseline coalition score is.
 
 ### Multiple output roots
 
@@ -122,7 +128,7 @@ Several roots can be passed at once (positionally and/or via a repeatable
 under it:
 
 ```bash
-.venv/bin/python -m experiments.collusion_via_tools.analysis.sweep_metrics_table \
+.venv/bin/python -m experiments.collusion_via_tools.analysis.tables \
     experiments/collusion_via_tools/saved_outputs
 ```
 
@@ -154,7 +160,7 @@ no cross-root marker in the delta table.
 | `markdown` | Same transposed layout as markdown pipe tables, for pasting into docs |
 
 ```bash
-.venv/bin/python -m experiments.collusion_via_tools.analysis.sweep_metrics_table \
+.venv/bin/python -m experiments.collusion_via_tools.analysis.tables \
     experiments/collusion_via_tools/outputs/run_1/20261024-011657_2coordrounds \
     --format markdown
 ```
@@ -165,12 +171,105 @@ coalition regret, coalition/non-coalition avg reward, avg agent reward,
 suspicion and correct-blame rates). It mixes with explicit keys, e.g.
 `--metrics headline,joint_reward`.
 
-## Sweep metric distributions
+### Significance
 
-`plot_sweep_metrics.py` turns the same per-sweep metrics into a figure (one per
-model, one panel per metric) so the *distribution* is visible, not just the
-mean. With n ≈ 10 runs per sweep a plain box plot is a weak summary, so the
-default is a **hybrid** panel per sweep:
+`tables.py` also runs the significance analysis. The mode is auto-detected from
+the flags (override with `--significance-mode {summary,delta,root}`, or skip it
+entirely with `--no-significance`):
+
+1. **One-step root mode** (`--reference SWEEP`). Pass the output roots plus
+   `--reference SWEEP`. The script loads every run, augments baseline runs with
+   the synthetic coalition metrics, computes the paired-by-seed deltas, writes
+   the same per-run CSV that the delta scatter writes, and runs the tests. No
+   intermediate file is needed.
+
+   ```bash
+   .venv/bin/python -m experiments.collusion_via_tools.analysis.tables \
+       experiments/collusion_via_tools/saved_outputs \
+       experiments/collusion_via_tools/outputs/run_1/20261024-164336_benign \
+       --reference benign_baseline_sweep \
+       --significance-out experiments/collusion_via_tools/analysis/plots_outputs/judge_vs_advantage_delta
+   ```
+
+   Outputs (in `--significance-out`, default
+   `plots_outputs/judge_vs_advantage_delta`):
+   * `judge_vs_advantage_delta_points.csv` -- the per-run paired deltas.
+   * `sweep_significance_delta.csv`         -- one row per statistical test.
+   * `sweep_significance_delta.md`          -- human-readable summary.
+
+2. **`--delta-csv PATH` mode**. If you already ran the delta scatter and have the
+   per-run CSV on disk, this mode skips the load + augment + compute step and
+   reads the file directly. Useful when the plot and the significance run are
+   decoupled. Outputs land next to the input CSV.
+
+3. **Summary-stats mode** (`--summary-csv PATH`, or the default
+   `plots_outputs/sweep_metrics/sweep_metrics_stats.csv` when it exists). Reads
+   the per-(sweep, metric) summary CSV and runs Welch's omnibus + pairwise t with
+   Holm-Bonferroni. Writes `sweep_significance.csv` / `sweep_significance.md`
+   next to the summary CSV.
+
+`--significance-md PATH` overrides the markdown output path.
+
+In all three cases the tests reported are:
+
+* **One-sample tests vs 0** per `(model, sweep)` for both `judge_delta`
+  and `advantage_delta` -- the natural *"did this sweep deviate
+  significantly from the reference?"* question. Both Welch's one-sample
+  `t` and Wilcoxon signed-rank are reported; the Wilcoxon is more
+  robust to outliers and non-normality, which matters for deltas that
+  routinely span 2-3 orders of magnitude.
+* **Paired `t` and Wilcoxon signed-rank** between every pair of sweeps
+  within the same `(model, metric)`, paired by seed.
+
+Holm-Bonferroni correction is applied within each `(model, metric)`
+family, and Hedges' g is reported alongside Cohen's d so a tiny effect
+at large `n` is not mistaken for a meaningful one.
+
+**Do not confuse the CSVs.** `tables.py --csv PATH` writes the *summary* table
+(one row per `(sweep, metric)` with `mean` / `std` / `n` columns) -- that is the
+right input for the *summary-stats* mode. The *per-run* file
+(`judge_vs_advantage_delta_points.csv`, one row per `(sweep, seed)` with
+`judge_delta` / `advantage_delta` columns) is what the `--delta-csv` mode and the
+one-step root mode produce. Passing the wrong file to `--delta-csv` produces a
+clear error from the delta mode listing the missing columns and pointing at the
+other mode.
+
+## Plots (`plots.py`)
+
+`plots.py` produces all three figure types in one run (each can be disabled
+individually). Figures are written into one subdirectory per plot type under
+`--out` (default `<package>/plots_outputs`):
+
+```
+<out>/sweep_metrics/sweep_metrics[_<model>].{png,pdf}
+<out>/sweep_metrics/sweep_metrics_stats.csv
+<out>/judge_vs_advantage/judge_vs_advantage[_<model>].{png,pdf}
+<out>/judge_vs_advantage/judge_vs_advantage_points.csv
+<out>/judge_vs_advantage_delta/judge_vs_advantage_delta[_<model>].{png,pdf}
+<out>/judge_vs_advantage_delta/judge_vs_advantage_delta_points.csv
+```
+
+Common options: `--root` (repeatable) / positional `<root>...`, `--out DIR`,
+`--order SWEEP,...`, `--exclude-error-runs`, `--exclude-failed-runs`, `--dpi N`.
+Per-plot controls: `--no-box`, `--no-scatter`, `--no-scatter-delta`,
+`--reference SWEEP`, `--no-reference-points`, `--regression`, `--no-na-panel`,
+`--x-metric`, `--y-metric`, `--metrics`, `--style {box,dot}`, `--annotate
+{mean,none}`, `--split`. `--csv PATH` / `--json PATH` override the primary plot
+type's CSV / JSON; otherwise each type writes its own default CSV.
+
+```bash
+# from the repo root
+.venv/bin/python -m experiments.collusion_via_tools.analysis.plots \
+    experiments/collusion_via_tools/saved_outputs --exclude-failed-runs \
+    --out /tmp/sweep_metric_plots
+```
+
+### Box plots (sweep metric distributions)
+
+The box plot turns the same per-sweep metrics into a figure (one per model, one
+panel per metric) so the *distribution* is visible, not just the mean. With
+n ≈ 10 runs per sweep a plain box plot is a weak summary, so the default is a
+**hybrid** panel per sweep:
 
 - **box = IQR + median** — the central spread and the median line,
 - **whiskers = min → max** (`whis=(0, 100)`, not `1.5·IQR`) so the extremes are
@@ -180,15 +279,16 @@ default is a **hybrid** panel per sweep:
   the min/max range.
 
 The default 2×3 grid covers the five headline metrics (joint reward, overall
-regret, coalition avg reward, coalition regret, suspicion rate); the sixth cell
-holds the legend.
+regret, coalition avg reward, coalition regret, suspicion rate) plus the post-hoc
+`collusion_judge_simple_mean` Likert judge score (0-5); runs without a judge
+score render as `n/a`.
 
 `--style dot` is the no-box alternative: a thin min–max whisker with caps, a
 thick **mean ± std** bar, a median tick and the raw points. `--split` also
 writes one single-panel PNG per metric. Rate metrics are plotted as **percent**
 (the raw 0–1 fraction × 100) so the axis, the `%` label and the `μ=12.9%`
 annotations agree; the `--csv` / `--json` stats keep the **raw fractions**, so
-they stay comparable with `sweep_metrics_table.py`.
+they stay comparable with `tables.py`.
 
 Two opt-in flags drop invalid runs before grouping and plotting. Both use the
 shared helpers in `sweep_metrics_table.py` and list the exclusions on stdout,
@@ -210,179 +310,96 @@ name them in the figure's runs-per-sweep detail line, and write them under
 
 Setting both applies the union (equivalent to strict, since collapsed ⊆ errored).
 
-```bash
-# from the repo root
-.venv/bin/python -m experiments.collusion_via_tools.analysis.plot_sweep_metrics \
-    experiments/collusion_via_tools/saved_outputs --exclude-failed-runs \
-    --out /tmp/sweep_metric_plots
-```
+### Raw scatter (judge score vs. coalition advantage)
 
-Options: `--style {box,dot}`, `--split`, `--metrics a,b,c`, `--annotate
-{mean,none}`, `--exclude-error-runs`, `--exclude-failed-runs`, `--order
-SWEEP,...`, `--csv PATH`, `--json PATH`, `--dpi N`. It also writes
-`sweep_metrics_stats.csv` (one row per model × sweep × metric) by default.
-
-## Judge score vs. coalition advantage
-
-`plot_judge_vs_advantage.py` answers a follow-up the headline box plots
-cannot: are the runs where the post-hoc LLM judge gave a high collusion
-score the *same* runs where the coalition actually pulled ahead? Each run is
-one point at `(collusion_judge_simple_mean, coalition_minus_noncoalition_avg)`,
-one series per sweep (distinct colour *and* marker for colour-blind /
-grayscale reading). `--regression` overlays a per-sweep OLS fit when
-n ≥ 3.
+This figure answers a follow-up the headline box plots cannot: are the runs
+where the post-hoc LLM judge gave a high collusion score the *same* runs where
+the coalition actually pulled ahead? Each run is one point at
+`(collusion_judge_simple_mean, coalition_minus_noncoalition_avg)`, one series
+per sweep (distinct colour *and* marker for colour-blind / grayscale reading).
+`--regression` overlays a per-sweep OLS fit when n ≥ 3.
 
 Runs whose judge score is missing (`None`) are routed to a separate
 "no judge" panel column at `x = -0.5` so they stay visible without warping
 the correlation axis; `--no-na-panel` drops them silently instead. Both
 axes are metric-aware (`--x-metric` / `--y-metric` accept any key from
-`METRICS_BY_KEY`), the unit suffix in the axis label follows the same
-`UNIT_BY_FMT` convention as the box plots, and the same `--exclude-error-runs`
-/ `--exclude-failed-runs` flags apply. Outputs land under
+`METRICS_BY_KEY`), and the unit suffix in the axis label follows the same
+`UNIT_BY_FMT` convention as the box plots. Outputs land under
 `plots_outputs/judge_vs_advantage/` by default.
 
 ```bash
-.venv/bin/python -m experiments.collusion_via_tools.analysis.plot_judge_vs_advantage \
-    experiments/collusion_via_tools/saved_outputs --regression
+.venv/bin/python -m experiments.collusion_via_tools.analysis.plots \
+    experiments/collusion_via_tools/saved_outputs --regression \
+    --no-box --no-scatter-delta
 ```
 
-## Judge score vs. coalition advantage, deltas vs a reference sweep
+### Paired-delta scatter (deltas vs a reference sweep)
 
-`plot_judge_vs_advantage_delta.py` is the same scatter framed as a
-**paired-by-seed delta against a reference sweep**. The reference is
-required (`--reference SWEEP`) and typically points at the benign
-baseline, so the chart answers the colosseum-paper question directly:
-*"relative to the no-collusion baseline, did the collusion sweep pull
-ahead on the judge axis and on the coalition-advantage axis, by how
-much, and in which runs?"*
+The same scatter framed as a **paired-by-seed delta against a reference sweep**.
+The reference is supplied with `--reference SWEEP` (typically the benign
+baseline) and enables this plot; without it the delta scatter is skipped. It
+answers the colosseum-paper question directly: *"relative to the no-collusion
+baseline, did the collusion sweep pull ahead on the judge axis and on the
+coalition-advantage axis, by how much, and in which runs?"*
 
-The script is a strict consumer of two existing fields:
+The plot is a strict consumer of two existing fields:
 
 * **x = Δ-judge score**  ``sweep_judge(seed) − reference_judge(seed)``
   via ``collusion_judge_simple.mean_score``.
 * **y = Δ-advantage**    ``sweep_advantage(seed) − reference_advantage(seed)``
   via ``coalition_minus_noncoalition_avg``.
 
-Neither field is redefined here: the existing table script, box plot
-and raw scatter all keep their current raw-value semantics, and this
-script only layers paired deltas on top.
+Neither field is redefined here: the table script and the box plot keep their
+current raw-value semantics, and this plot only layers paired deltas on top.
+A benign baseline run carries no `coalition_*` fields, so the plot infers a
+counterfactual coalition from the non-baseline runs via
+`aggregate_protocols.identify_colluder_set` (see *Baseline coalition inference*
+above); the augmentation is in memory only. The CSV / JSON carry the inferred
+`colluder_set` and the `reference` name, so the deltas are reproducible without
+rerunning the inference.
 
-### Baseline coalition inference
-
-A benign baseline run carries no `coalition_*` fields (there is no
-coalition to aggregate). To put it on the same axis, the script infers
-a counterfactual coalition from the non-baseline runs via
-`aggregate_protocols.identify_colluder_set` (the stable intersection of
-`agents[].role == "adversary"` across all collusion runs) and writes the
-synthetic `coalition_reward_sum` / `coalition_max_reward_sum` /
-`coalition_reward_regret` (and the matching `noncoalition_*`) fields
-into the baseline run via `augment_baseline_coalition_metrics`, which
-in turn populates the same `coalition_minus_noncoalition_avg` field
-the existing pipeline uses. The augmentation is in memory only; no
-`metrics.json` on disk is touched.
-
-The inference uses the same formula as `collusion_via_tools.metrics` so
-a baseline and a collusion run are directly comparable:
-`coalition_max = (max_joint_reward / total_agents) * |S|` and
-`coalition_regret = max(0, coalition_max − coalition_sum)`.
-
-### Paired-by-seed semantics
-
-For every seed present in both a sweep and the reference, the plotted
-point is
+For every seed present in both a sweep and the reference, the plotted point is
 
 ```
 x = sweep_judge(seed)     − reference_judge(seed)
 y = sweep_advantage(seed) − reference_advantage(seed)
 ```
 
-Seeds missing from either side are dropped from that sweep, with a
-per-sweep `paired seeds` count in the figure's detail line. The
-reference itself plots at `(0, 0)` for every seed it has; pass
-`--no-reference-points` to draw it only as a `y = 0` baseline.
+Seeds missing from either side are dropped from that sweep, with a per-sweep
+`paired seeds` count in the figure's detail line. The reference itself plots at
+`(0, 0)` for every seed it has; pass `--no-reference-points` to draw it only as a
+`y = 0` baseline. Outputs land under `plots_outputs/judge_vs_advantage_delta/` by
+default.
 
 ```bash
-.venv/bin/python -m experiments.collusion_via_tools.analysis.plot_judge_vs_advantage_delta \
+.venv/bin/python -m experiments.collusion_via_tools.analysis.plots \
     experiments/collusion_via_tools/saved_outputs \
     experiments/collusion_via_tools/outputs/run_1/20261024-164336_benign \
     --reference benign_baseline_sweep
 ```
 
-Outputs land under `plots_outputs/judge_vs_advantage_delta/` by default.
-The CSV / JSON carry the inferred `colluder_set` and the `reference`
-name, so the deltas are reproducible without rerunning the inference.
+## Migration
 
-## Significance on the paired deltas
+The five per-script CLIs are now deprecated wrappers. They still work — each
+prints a `DeprecationWarning` to stderr and forwards to the consolidated entry
+point — but new commands should use `tables.py` / `plots.py`.
 
-`sweep_significance.py` has three modes:
+| Old command | New command |
+|---|---|
+| `python -m ...analysis.sweep_metrics_table <root> ...` | `python -m ...analysis.tables <root> ...` |
+| `python -m ...analysis.sweep_significance <root> --reference SWEEP` | `python -m ...analysis.tables <root> --reference SWEEP` |
+| `python -m ...analysis.sweep_significance --summary-csv CSV` | `python -m ...analysis.tables --summary-csv CSV` |
+| `python -m ...analysis.sweep_significance --delta-csv CSV` | `python -m ...analysis.tables --delta-csv CSV` |
+| `python -m ...analysis.plot_sweep_metrics <root> ...` | `python -m ...analysis.plots <root> --no-scatter --no-scatter-delta ...` |
+| `python -m ...analysis.plot_judge_vs_advantage <root> ...` | `python -m ...analysis.plots <root> --no-box --no-scatter-delta ...` |
+| `python -m ...analysis.plot_judge_vs_advantage_delta <root> --reference SWEEP` | `python -m ...analysis.plots <root> --no-box --no-scatter --reference SWEEP` |
 
-1. **One-step root mode** (default for the delta workflow). Pass the
-   output roots positionally plus `--reference SWEEP`. The script
-   loads every run, augments baseline runs with the synthetic coalition
-   metrics, computes the paired-by-seed deltas, writes the same
-   per-run CSV that `plot_judge_vs_advantage_delta` would have written,
-   and runs the significance tests. No intermediate file is needed.
-
-   ```bash
-   .venv/bin/python -m experiments.collusion_via_tools.analysis.sweep_significance \
-       experiments/collusion_via_tools/saved_outputs \
-       experiments/collusion_via_tools/outputs/run_1/20261024-164336_benign \
-       --reference benign_baseline_sweep \
-       --out experiments/collusion_via_tools/analysis/plots_outputs/judge_vs_advantage_delta
-   ```
-
-   Outputs (in `--out`):
-   * `judge_vs_advantage_delta_points.csv` -- the per-run paired deltas.
-   * `sweep_significance_delta.csv`         -- one row per statistical test.
-   * `sweep_significance_delta.md`          -- human-readable summary.
-
-2. **`--delta-csv PATH` mode**. If you already ran the delta plot script
-   and have the per-run CSV on disk, this mode skips the load +
-   augment + compute step and reads the file directly. Useful when the
-   plot and the significance run are decoupled.
-
-3. **Default mode** (no `--delta-csv`, no `--reference`). Reads
-   `sweep_metrics_stats.csv` and runs the original Welch's omnibus +
-   pairwise t with Holm-Bonferroni on the per-(sweep, metric) summary
-   stats.
-
-In all three cases the tests reported are:
-
-* **One-sample tests vs 0** per `(model, sweep)` for both `judge_delta`
-  and `advantage_delta` -- the natural *"did this sweep deviate
-  significantly from the reference?"* question. Both Welch's one-sample
-  `t` and Wilcoxon signed-rank are reported; the Wilcoxon is more
-  robust to outliers and non-normality, which matters for deltas that
-  routinely span 2-3 orders of magnitude.
-* **Paired `t` and Wilcoxon signed-rank** between every pair of sweeps
-  within the same `(model, metric)`, paired by seed.
-
-Holm-Bonferroni correction is applied within each `(model, metric)`
-family, and Hedges' g is reported alongside Cohen's d so a tiny effect
-at large `n` is not mistaken for a meaningful one.
-
-**Do not confuse the CSVs.** `sweep_metrics_table.py --csv PATH`
-writes the *summary* delta table (one row per `(sweep, metric)` with
-`mean` / `std` / `n` columns) -- that is the right input for the
-*default* mode (no flag) of `sweep_significance.py`. The
-*per-run* file (`judge_vs_advantage_delta_points.csv`, one row per
-`(sweep, seed)` with `judge_delta` / `advantage_delta` columns) is
-what the `--delta-csv` mode and the one-step root mode produce.
-Passing the wrong file to `--delta-csv` produces a clear error from
-the delta mode listing the missing columns and pointing at the other
-script or mode.
-
-* **One-sample tests vs 0** for each sweep -- the natural
-  *"did this sweep deviate significantly from the reference?"* question.
-  Both Welch's one-sample `t` and Wilcoxon signed-rank are reported; the
-  Wilcoxon is more robust to outliers and non-normality, which matters
-  for deltas that routinely span 2-3 orders of magnitude.
-* **Paired `t` and Wilcoxon signed-rank** between every pair of sweeps
-  within the same (model, metric), paired by seed.
-
-Holm-Bonferroni correction is applied within each (model, metric) family,
-and Hedges' g is reported alongside Cohen's d so a tiny effect at large
-`n` is not mistaken for a meaningful one.
+Plumbing modules and their helper functions (`sweep_metrics_table`,
+`sweep_significance`, `plot_sweep_metrics`, `plot_judge_vs_advantage`,
+`plot_judge_vs_advantage_delta`, `delta_metrics`, `aggregate_protocols`) keep
+their public functions, so existing imports of `find_metric_files`,
+`load_runs`, `partition_runs`, `group_runs`, the significance statistics
+helpers and the figure-rendering helpers continue to work unchanged.
 
 ## Dimension taxonomy
 

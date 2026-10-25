@@ -1350,88 +1350,18 @@ def write_json(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="sweep_metrics_table",
-        description="Print key metrics (mean +/- std) per sweep for a sweep root.",
+    """Deprecated — kept so existing callers can introspect the namespace.
+
+    Forwards to :func:`tables.parse_args` and returns the same namespace shape.
+    """
+    print(
+        "warning: sweep_metrics_table.parse_args is deprecated; use "
+        "`python -m experiments.collusion_via_tools.analysis.tables` instead",
+        file=sys.stderr,
     )
-    parser.add_argument(
-        "root",
-        nargs="*",
-        default=None,
-        help="One or more experiment output root directories.",
-    )
-    parser.add_argument(
-        "--root",
-        dest="root_opt",
-        action="append",
-        default=None,
-        help="Alternative (repeatable) way to pass a root.",
-    )
-    parser.add_argument(
-        "--csv", dest="csv_path", default=None, help="Write long-format CSV here."
-    )
-    parser.add_argument(
-        "--json", dest="json_path", default=None, help="Write nested JSON here."
-    )
-    parser.add_argument(
-        "--sweep",
-        dest="sweeps",
-        action="append",
-        default=None,
-        help="Restrict to a sweep or source (repeatable).",
-    )
-    parser.add_argument(
-        "--source",
-        dest="sources",
-        action="append",
-        default=None,
-        help="Restrict to a source (repeatable).",
-    )
-    parser.add_argument(
-        "--metrics", dest="metrics", default=None, help="Comma-separated metric subset."
-    )
-    parser.add_argument(
-        "--ddof",
-        dest="ddof",
-        type=int,
-        choices=(0, 1),
-        default=1,
-        help="Std ddof (default 1).",
-    )
-    parser.add_argument(
-        "--reference",
-        dest="reference",
-        default=None,
-        help="Reference sweep for the delta table.",
-    )
-    parser.add_argument(
-        "--no-delta", dest="no_delta", action="store_true", help="Skip the delta table."
-    )
-    parser.add_argument(
-        "--exclude-error-runs",
-        dest="exclude_error_runs",
-        action="store_true",
-        help=(
-            "Drop runs that recorded a failed agent turn (mirrors resume.py; opt-in)."
-        ),
-    )
-    parser.add_argument(
-        "--exclude-failed-runs",
-        dest="exclude_failed_runs",
-        action="store_true",
-        help=(
-            "Drop only runs that collapsed (failed turn AND no assignment); "
-            "narrower than --exclude-error-runs (opt-in)."
-        ),
-    )
-    parser.add_argument(
-        "--format",
-        dest="fmt",
-        choices=("plain", "formatted", "markdown"),
-        default="plain",
-        help="Output layout (default plain).",
-    )
-    return parser.parse_args(argv)
+    from .tables import parse_args as _tables_parse_args
+
+    return _tables_parse_args(argv)
 
 
 def resolve_metrics(metrics_arg: str | None) -> list[MetricSpec]:
@@ -1540,175 +1470,15 @@ def print_transposed_output(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-
-    roots = list(args.root or []) + list(args.root_opt or [])
-    if not roots:
-        print("error: a root path is required (positional or --root)", file=sys.stderr)
-        return 2
-
-    roots_abs = [os.path.abspath(root) for root in roots]
-    missing = [root for root in roots_abs if not os.path.exists(root)]
-    if missing:
-        for root in missing:
-            print(f"error: path does not exist: {root}", file=sys.stderr)
-        return 2
-
-    specs = resolve_metrics(args.metrics)
-
-    found: list[str] = []
-    runs: list[RunData] = []
-    for root_abs in roots_abs:
-        root_found = find_metric_files(root_abs)
-        found.extend(root_found)
-        runs.extend(load_runs(root_abs, root_found))
-    runs_used = len(runs)
-
-    kept_runs, excluded_runs = partition_runs(
-        runs, args.exclude_error_runs, args.exclude_failed_runs
+    """Deprecated shim — see ``tables.py`` for the consolidated entry point."""
+    print(
+        "warning: sweep_metrics_table.main is deprecated; use "
+        "`python -m experiments.collusion_via_tools.analysis.tables` instead",
+        file=sys.stderr,
     )
-    excluded_runs.sort(key=_excluded_sort_key)
+    from .tables import main as _tables_main
 
-    # Augment any benign-baseline runs (``adversary_count == 0``) with the
-    # counterfactual coalition metrics so Table C's paired-by-seed delta
-    # against the baseline resolves for the coalition-aware columns
-    # (``coalition_minus_noncoalition_avg``, ``coalition_reward_regret``).
-    # In-memory only; no ``metrics.json`` is mutated.
-    augment = _ensure_baseline_coalition_helpers()
-    inferred_colluders = augment(kept_runs)
-    if inferred_colluders:
-        print(
-            f"baseline coalition inferred from non-baseline sweeps: "
-            f"{sorted(inferred_colluders)}"
-        )
-
-    # Totals per (model, sweep) over everything on disk, so Table A can show
-    # how many runs were aggregated versus how many exist.
-    totals_by_model: dict[str, dict[str, int]] = {}
-    for run in runs:
-        model_totals = totals_by_model.setdefault(run.model, {})
-        model_totals[run.sweep] = model_totals.get(run.sweep, 0) + 1
-
-    grouped = group_runs(kept_runs)
-
-    # Filter to requested sweeps/sources, if any.
-    if args.sweeps:
-        grouped = filter_groups_by_sweep(grouped, set(args.sweeps))
-    if args.sources:
-        grouped = filter_groups_by_source(grouped, set(args.sources))
-    grouped = {model: groups for model, groups in grouped.items() if groups}
-    if (args.sweeps or args.sources) and not grouped:
-        print("warning: no groups matched the requested filters", file=sys.stderr)
-
-    # Summarize only the sources that survive filtering, so the counts match the
-    # tables below.
-    selected_runs = [
-        run
-        for model_groups in grouped.values()
-        for group in model_groups
-        for run in group.runs
-    ]
-    source_summaries = summarize_sources(selected_runs)
-
-    models = sorted(grouped)
-
-    if not kept_runs:
-        print("No usable runs found.", file=sys.stderr)
-
-    if len(roots_abs) == 1:
-        print(f"root:      {roots_abs[0]}")
-    else:
-        print("roots:")
-        for root_abs in roots_abs:
-            print(f"            {root_abs}")
-    sources_line = ", ".join(
-        f"{source['display']} ({source['n_runs']} runs)" for source in source_summaries
-    )
-    print(f"sources:   {sources_line}")
-    print(f"runs found: {len(found)}  (usable: {runs_used})")
-    if excluded_runs:
-        if args.exclude_error_runs and args.exclude_failed_runs:
-            print(f"excluded runs: {len(excluded_runs)} of {runs_used}")
-        elif args.exclude_failed_runs:
-            print(f"excluded failed runs: {len(excluded_runs)} of {runs_used}")
-        else:
-            print(f"excluded error runs: {len(excluded_runs)} of {runs_used}")
-        for run, agents in excluded_runs:
-            seed = run.seed()
-            seed_cell = f"seed{seed}" if seed is not None else "-"
-            agents_cell = f"[{', '.join(agents)}]" if agents else "-"
-            line = f"  {run.sweep}  {seed_cell}  {agents_cell}"
-            if args.exclude_failed_runs:
-                line += f"  ({_exclusion_reason(run, True)})"
-            print(line)
-    print(f"ddof:      {args.ddof}")
-
-    groups: dict[str, dict[str, GroupMetrics]] = {}
-    for model in models:
-        groups[model] = {
-            group.label: compute_group_metrics(group.runs, specs, args.ddof)
-            for group in grouped[model]
-        }
-
-    delta_specs = [METRICS_BY_KEY[k] for k in DELTA_METRICS if k in METRICS_BY_KEY]
-    show_delta = not args.no_delta
-
-    if args.fmt == "plain":
-        for model in models:
-            print_inventory(grouped[model], model, totals_by_model.get(model))
-            print_metrics_table(
-                [group.label for group in grouped[model]],
-                groups[model],
-                specs,
-                model,
-            )
-
-        if show_delta:
-            for model in models:
-                reference = resolve_reference(grouped[model], args.reference, model)
-                if reference is None:
-                    continue
-                print_delta_table(
-                    grouped[model],
-                    reference,
-                    delta_specs,
-                    model,
-                    args.ddof,
-                )
-    else:
-        print_transposed_output(
-            models,
-            grouped,
-            groups,
-            specs,
-            delta_specs,
-            args.reference,
-            args.ddof,
-            args.fmt,
-            show_delta,
-            totals_by_model,
-        )
-
-    if args.csv_path:
-        write_csv(args.csv_path, specs, models, grouped, groups)
-        print(f"\nWrote CSV: {os.path.abspath(args.csv_path)}")
-    if args.json_path:
-        write_json(
-            args.json_path,
-            roots_abs,
-            source_summaries,
-            args.ddof,
-            len(found),
-            runs_used,
-            specs,
-            grouped,
-            groups,
-            excluded_runs,
-            args.exclude_failed_runs,
-        )
-        print(f"Wrote JSON: {os.path.abspath(args.json_path)}")
-
-    return 0
+    return _tables_main(argv)
 
 
 if __name__ == "__main__":

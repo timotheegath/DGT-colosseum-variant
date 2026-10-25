@@ -274,7 +274,7 @@ DETAIL_FONT = 10
 # --------------------------------------------------------------------------- #
 from .delta_metrics import (  # noqa: E402
     DeltaPoint,
-    compute_paired_deltas,
+    compute_paired_deltas,  # noqa: F401  (re-exported for backward compatibility)
 )
 
 
@@ -597,76 +597,15 @@ def write_deltas_json(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="plot_judge_vs_advantage_delta",
-        description=(
-            "Scatter coalition-advantage delta (y) vs. LLM-judge-score delta (x) "
-            "vs. a reference sweep, paired by seed. Both deltas are computed "
-            "on top of the existing coalition_minus_noncoalition_avg and "
-            "collusion_judge_simple_mean fields."
-        ),
+    """Deprecated — forwards to :func:`plots.parse_args`."""
+    print(
+        "warning: plot_judge_vs_advantage_delta.parse_args is deprecated; use "
+        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
+        file=sys.stderr,
     )
-    parser.add_argument(
-        "root",
-        nargs="*",
-        default=None,
-        help="One or more experiment output roots.",
-    )
-    parser.add_argument(
-        "--root",
-        dest="root_opt",
-        action="append",
-        default=None,
-        help="Alternative (repeatable) way to pass a root.",
-    )
-    parser.add_argument("--out", dest="out", default=None, help="Output directory.")
-    parser.add_argument(
-        "--reference",
-        dest="reference",
-        required=True,
-        help="Reference sweep name (required). All other sweeps are deltas vs this.",
-    )
-    parser.add_argument(
-        "--order",
-        dest="order",
-        default=None,
-        help="Explicit comma-separated sweep order (default alphabetical).",
-    )
-    parser.add_argument(
-        "--exclude-error-runs",
-        dest="exclude_error_runs",
-        action="store_true",
-        help="Drop every run with a failed agent turn (strict rule).",
-    )
-    parser.add_argument(
-        "--exclude-failed-runs",
-        dest="exclude_failed_runs",
-        action="store_true",
-        help="Drop only collapsed runs (failed turn + no assignment).",
-    )
-    parser.add_argument(
-        "--no-reference-points",
-        dest="no_reference_points",
-        action="store_true",
-        help="Skip plotting the reference sweep points (it then appears as a y=0 line only).",
-    )
-    parser.add_argument(
-        "--csv", dest="csv_path", default=None, help="Write the per-run deltas here."
-    )
-    parser.add_argument(
-        "--json",
-        dest="json_path",
-        default=None,
-        help="Write the deltas plus excluded-run metadata as JSON.",
-    )
-    parser.add_argument(
-        "--dpi",
-        dest="dpi",
-        type=int,
-        default=300,
-        help="Raster resolution (default 300).",
-    )
-    return parser.parse_args(argv)
+    from .plots import parse_args as _plots_parse_args
+
+    return _plots_parse_args(argv)
 
 
 def default_out_dir() -> str:
@@ -678,169 +617,17 @@ def default_out_dir() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-
-    roots = list(args.root or []) + list(args.root_opt or [])
-    if not roots:
-        print("error: a root path is required (positional or --root)", file=sys.stderr)
-        return 2
-
-    roots_abs = [os.path.abspath(root) for root in roots]
-    missing = [root for root in roots_abs if not os.path.exists(root)]
-    if missing:
-        for root in missing:
-            print(f"error: path does not exist: {root}", file=sys.stderr)
-        return 2
-
-    runs: list[Any] = []
-    for root_abs in roots_abs:
-        found = find_metric_files(root_abs)
-        runs.extend(load_runs(root_abs, found))
-    if not runs:
-        print("warning: no usable runs found", file=sys.stderr)
-        return 0
-
-    runs_used = len(runs)
-    kept_runs, excluded_pairs = partition_runs(
-        runs, args.exclude_error_runs, args.exclude_failed_runs
+    """Deprecated shim — see ``plots.py``."""
+    print(
+        "warning: plot_judge_vs_advantage_delta.main is deprecated; use "
+        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
+        file=sys.stderr,
     )
-    excluded_pairs.sort(key=excluded_sort_key)
+    from .plots import main as _plots_main
 
-    if args.exclude_error_runs and args.exclude_failed_runs:
-        summary_header = "excluded runs"
-        excluded_noun = "run"
-    elif args.exclude_failed_runs:
-        summary_header = "excluded failed runs"
-        excluded_noun = "failed run"
-    else:
-        summary_header = "excluded error runs"
-        excluded_noun = "error turn"
-
-    if excluded_pairs:
-        print(f"{summary_header}: {len(excluded_pairs)} of {runs_used}")
-        for run, agents in excluded_pairs:
-            seed = run.seed()
-            seed_cell = f"seed{seed}" if seed is not None else "-"
-            agents_cell = f"[{', '.join(agents)}]" if agents else "-"
-            line = f"  {run.sweep}  {seed_cell}  {agents_cell}"
-            if args.exclude_failed_runs:
-                line += f"  ({exclusion_reason(run, True)})"
-            print(line)
-
-    if not kept_runs:
-        print(
-            "warning: no usable runs left after excluding runs",
-            file=sys.stderr,
-        )
-        return 0
-
-    # Identify the colluder set from the kept non-baseline runs, then
-    # augment every baseline run with the synthetic coalition metrics.
-    colluder_set = augment_runs_with_baseline_coalition(kept_runs)
-    if colluder_set:
-        print(
-            f"colluder set (inferred from non-baseline sweeps): {sorted(colluder_set)}"
-        )
-
-    grouped = group_runs(kept_runs)
-    models = sorted(grouped)
-
-    # Reference must exist in at least one model.
-    ref_seen_in: set[str] = {
-        model for model in models if args.reference in grouped[model]
-    }
-    if not ref_seen_in:
-        print(
-            f"error: reference sweep '{args.reference}' not found under any provided root",
-            file=sys.stderr,
-        )
-        return 2
-
-    excluded_by_model: dict[str, int] = {}
-    for run, _agents in excluded_pairs:
-        excluded_by_model[run.model] = excluded_by_model.get(run.model, 0) + 1
-
-    excluded_records = [
-        {
-            "model": run.model,
-            "sweep": run.sweep,
-            "seed": run.seed(),
-            "run_id": run.run_id,
-            "agents": list(agents),
-            "reason": exclusion_reason(run, args.exclude_failed_runs),
-        }
-        for run, agents in excluded_pairs
-    ]
-
-    order = [token.strip() for token in (args.order or "").split(",") if token.strip()]
-
-    all_points: list[DeltaPoint] = []
-
-    out_dir = args.out or default_out_dir()
-    os.makedirs(out_dir, exist_ok=True)
-    multi = len(models) > 1
-    written: list[str] = []
-
-    for model in models:
-        if args.reference not in grouped[model]:
-            print(
-                f"warning: reference sweep '{args.reference}' has no runs for model "
-                f"{model!r}; skipping figure",
-                file=sys.stderr,
-            )
-            continue
-        sweeps_present = sorted(grouped[model])
-        sweeps = order_sweeps(sweeps_present, order, args.reference)
-        # Delegate the paired-by-seed delta computation to the shared
-        # helper so this script and ``sweep_significance.py --root`` agree
-        # on the math.
-        model_points, _ = compute_paired_deltas(grouped, args.reference)
-        points_for_model = [p for p in model_points if p.model == model]
-
-        points_by_sweep: dict[str, list[DeltaPoint]] = {sweep: [] for sweep in sweeps}
-        run_counts: dict[str, int] = {sweep: 0 for sweep in sweeps}
-        for pt in points_for_model:
-            points_by_sweep[pt.sweep].append(pt)
-            run_counts[pt.sweep] += 1
-            all_points.append(pt)
-
-        fig = render_model_figure(
-            model,
-            sweeps,
-            points_by_sweep,
-            args.reference,
-            run_counts,
-            not args.no_reference_points,
-            excluded_by_model.get(model, 0),
-            excluded_noun,
-        )
-        base = "judge_vs_advantage_delta" + (f"_{slugify(model)}" if multi else "")
-        png_path = os.path.join(out_dir, base + ".png")
-        pdf_path = os.path.join(out_dir, base + ".pdf")
-        save_figure(fig, png_path, args.dpi)
-        save_figure(fig, pdf_path, args.dpi)
-        written.extend([png_path, pdf_path])
-
-    csv_path = args.csv_path or os.path.join(
-        out_dir, "judge_vs_advantage_delta_points.csv"
-    )
-    write_deltas_csv(csv_path, all_points)
-    written.append(csv_path)
-
-    if args.json_path:
-        write_deltas_json(
-            args.json_path,
-            all_points,
-            excluded_records,
-            sorted(colluder_set),
-            args.reference,
-        )
-        written.append(args.json_path)
-
-    print("Wrote:")
-    for path in written:
-        print(f"  {os.path.abspath(path)}")
-    return 0
+    forwarded = list(sys.argv[1:] if argv is None else argv)
+    forwarded += ["--legacy-mode", "scatter-delta"]
+    return _plots_main(forwarded)
 
 
 if __name__ == "__main__":

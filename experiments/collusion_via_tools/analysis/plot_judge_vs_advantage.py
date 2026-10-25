@@ -689,92 +689,15 @@ def write_points_json(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="plot_judge_vs_advantage",
-        description=(
-            "Scatter coalition advantage (y) vs. LLM-judge score (x); one series "
-            "per sweep."
-        ),
+    """Deprecated — forwards to :func:`plots.parse_args`."""
+    print(
+        "warning: plot_judge_vs_advantage.parse_args is deprecated; use "
+        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
+        file=sys.stderr,
     )
-    parser.add_argument(
-        "root",
-        nargs="*",
-        default=None,
-        help="One or more experiment output roots.",
-    )
-    parser.add_argument(
-        "--root",
-        dest="root_opt",
-        action="append",
-        default=None,
-        help="Alternative (repeatable) way to pass a root.",
-    )
-    parser.add_argument("--out", dest="out", default=None, help="Output directory.")
-    parser.add_argument(
-        "--x-metric",
-        dest="x_metric",
-        default=DEFAULT_X_KEY,
-        help=(
-            "X-axis metric key (default: coalition_judge_simple_mean). "
-            "Must exist in sweep_metrics_table.METRICS_BY_KEY."
-        ),
-    )
-    parser.add_argument(
-        "--y-metric",
-        dest="y_metric",
-        default=DEFAULT_Y_KEY,
-        help=(
-            "Y-axis metric key (default: coalition_minus_noncoalition_avg). "
-            "Must exist in sweep_metrics_table.METRICS_BY_KEY."
-        ),
-    )
-    parser.add_argument(
-        "--order",
-        dest="order",
-        default=None,
-        help="Explicit comma-separated sweep order (default alphabetical).",
-    )
-    parser.add_argument(
-        "--exclude-error-runs",
-        dest="exclude_error_runs",
-        action="store_true",
-        help="Drop every run with a failed agent turn (strict rule).",
-    )
-    parser.add_argument(
-        "--exclude-failed-runs",
-        dest="exclude_failed_runs",
-        action="store_true",
-        help="Drop only collapsed runs (failed turn + no assignment).",
-    )
-    parser.add_argument(
-        "--regression",
-        dest="regression",
-        action="store_true",
-        help="Overlay a per-sweep OLS fit (only when n>=3 points are available).",
-    )
-    parser.add_argument(
-        "--no-na-panel",
-        dest="no_na_panel",
-        action="store_true",
-        help="Skip the 'no judge' panel; runs without a judge score are dropped.",
-    )
-    parser.add_argument(
-        "--csv", dest="csv_path", default=None, help="Write the per-run points here."
-    )
-    parser.add_argument(
-        "--json",
-        dest="json_path",
-        default=None,
-        help="Write the per-run points plus excluded-run metadata as JSON.",
-    )
-    parser.add_argument(
-        "--dpi",
-        dest="dpi",
-        type=int,
-        default=300,
-        help="Raster resolution (default 300).",
-    )
-    return parser.parse_args(argv)
+    from .plots import parse_args as _plots_parse_args
+
+    return _plots_parse_args(argv)
 
 
 def default_out_dir() -> str:
@@ -786,174 +709,17 @@ def default_out_dir() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-
-    roots = list(args.root or []) + list(args.root_opt or [])
-    if not roots:
-        print("error: a root path is required (positional or --root)", file=sys.stderr)
-        return 2
-
-    roots_abs = [os.path.abspath(root) for root in roots]
-    missing = [root for root in roots_abs if not os.path.exists(root)]
-    if missing:
-        for root in missing:
-            print(f"error: path does not exist: {root}", file=sys.stderr)
-        return 2
-
-    if args.x_metric not in METRICS_BY_KEY:
-        print(
-            f"error: unknown x-metric '{args.x_metric}'. Known: {sorted(METRICS_BY_KEY)}",
-            file=sys.stderr,
-        )
-        return 2
-    if args.y_metric not in METRICS_BY_KEY:
-        print(
-            f"error: unknown y-metric '{args.y_metric}'. Known: {sorted(METRICS_BY_KEY)}",
-            file=sys.stderr,
-        )
-        return 2
-
-    x_spec = METRICS_BY_KEY[args.x_metric]
-    y_spec = METRICS_BY_KEY[args.y_metric]
-
-    runs: list[Any] = []
-    for root_abs in roots_abs:
-        found = find_metric_files(root_abs)
-        runs.extend(load_runs(root_abs, found))
-    if not runs:
-        print("warning: no usable runs found", file=sys.stderr)
-        return 0
-
-    runs_used = len(runs)
-    kept_runs, excluded_pairs = partition_runs(
-        runs, args.exclude_error_runs, args.exclude_failed_runs
+    """Deprecated shim — see ``plots.py``."""
+    print(
+        "warning: plot_judge_vs_advantage.main is deprecated; use "
+        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
+        file=sys.stderr,
     )
-    excluded_pairs.sort(key=excluded_sort_key)
+    from .plots import main as _plots_main
 
-    if args.exclude_error_runs and args.exclude_failed_runs:
-        summary_header = "excluded runs"
-        excluded_noun = "run"
-    elif args.exclude_failed_runs:
-        summary_header = "excluded failed runs"
-        excluded_noun = "failed run"
-    else:
-        summary_header = "excluded error runs"
-        excluded_noun = "error turn"
-
-    if excluded_pairs:
-        print(f"{summary_header}: {len(excluded_pairs)} of {runs_used}")
-        for run, agents in excluded_pairs:
-            seed = run.seed()
-            seed_cell = f"seed{seed}" if seed is not None else "-"
-            agents_cell = f"[{', '.join(agents)}]" if agents else "-"
-            line = f"  {run.sweep}  {seed_cell}  {agents_cell}"
-            if args.exclude_failed_runs:
-                line += f"  ({exclusion_reason(run, True)})"
-            print(line)
-
-    if not kept_runs:
-        print(
-            "warning: no usable runs left after excluding runs",
-            file=sys.stderr,
-        )
-        return 0
-
-    excluded_by_model: dict[str, int] = {}
-    for run, _agents in excluded_pairs:
-        excluded_by_model[run.model] = excluded_by_model.get(run.model, 0) + 1
-
-    excluded_records = [
-        {
-            "model": run.model,
-            "sweep": run.sweep,
-            "seed": run.seed(),
-            "run_id": run.run_id,
-            "agents": list(agents),
-            "reason": exclusion_reason(run, args.exclude_failed_runs),
-        }
-        for run, agents in excluded_pairs
-    ]
-
-    points = build_points(kept_runs, args.x_metric, args.y_metric)
-
-    if not args.no_na_panel:
-        plotted = [pt for pt in points if pt.x is not None]
-        na = [pt for pt in points if pt.x is None and pt.y is not None]
-    else:
-        plotted = [pt for pt in points if pt.x is not None]
-        na = []
-        if any(pt.x is None and pt.y is not None for pt in points):
-            print(
-                f"warning: dropping {sum(1 for pt in points if pt.x is None and pt.y is not None)} "
-                "runs without a judge score (--no-na-panel)",
-                file=sys.stderr,
-            )
-
-    if not plotted and not na:
-        print(
-            f"warning: no runs have values for both x='{args.x_metric}' and y='{args.y_metric}'",
-            file=sys.stderr,
-        )
-        return 0
-
-    grouped = group_runs(plotted + na)
-    models = sorted(grouped)
-    order = [token.strip() for token in (args.order or "").split(",") if token.strip()]
-
-    out_dir = args.out or default_out_dir()
-    os.makedirs(out_dir, exist_ok=True)
-    multi = len(models) > 1
-
-    written: list[str] = []
-
-    for model in models:
-        sweeps_all = sorted(grouped[model])
-        sweeps = order_sweeps(sweeps_all, order)
-        plotted_by_sweep: dict[str, list[Point]] = {sweep: [] for sweep in sweeps}
-        na_by_sweep: dict[str, list[Point]] = {sweep: [] for sweep in sweeps}
-        for pt in plotted:
-            if pt.model == model:
-                plotted_by_sweep[pt.sweep].append(pt)
-        for pt in na:
-            if pt.model == model:
-                na_by_sweep[pt.sweep].append(pt)
-        run_counts = {
-            sweep: len(plotted_by_sweep[sweep]) + len(na_by_sweep[sweep])
-            for sweep in sweeps
-        }
-
-        fig = render_model_figure(
-            model,
-            sweeps,
-            plotted_by_sweep,
-            na_by_sweep,
-            x_spec,
-            y_spec,
-            run_counts,
-            args.regression,
-            not args.no_na_panel,
-            excluded_by_model.get(model, 0),
-            excluded_noun,
-        )
-        base = "judge_vs_advantage" + (f"_{slugify(model)}" if multi else "")
-        png_path = os.path.join(out_dir, base + ".png")
-        pdf_path = os.path.join(out_dir, base + ".pdf")
-        save_figure(fig, png_path, args.dpi)
-        save_figure(fig, pdf_path, args.dpi)
-        written.extend([png_path, pdf_path])
-
-    csv_path = args.csv_path or os.path.join(out_dir, "judge_vs_advantage_points.csv")
-    write_points_csv(csv_path, plotted + na)
-    written.append(csv_path)
-
-    if args.json_path:
-        write_points_json(args.json_path, plotted + na, excluded_records)
-        written.append(args.json_path)
-
-    print("Wrote:")
-    for path in written:
-        print(f"  {os.path.abspath(path)}")
-    return 0
+    forwarded = list(sys.argv[1:] if argv is None else argv)
+    forwarded += ["--legacy-mode", "scatter"]
+    return _plots_main(forwarded)
 
 
 if __name__ == "__main__":

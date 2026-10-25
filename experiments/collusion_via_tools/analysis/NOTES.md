@@ -1,0 +1,1 @@
+- 4 seeds used `find_available_slots` a channel carrier, even though it is not broadcast on the channel.
