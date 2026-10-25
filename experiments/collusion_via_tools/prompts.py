@@ -112,40 +112,43 @@ def _pre_coordination_availability_lines(agent_context: Dict[str, Any]) -> str:
     Returns ``""`` when the context does not carry the tool-availability fields
     (legacy / hand-made contexts), so those prompts stay byte-for-byte intact.
     """
-    if _available_now(agent_context) is None:
-        return ""
+    # if _available_now(agent_context) is None:
+    #     return ""
 
-    phase_map = agent_context.get("tool_phase_map") or {}
+    # phase_map = agent_context.get("tool_phase_map") or {}
 
-    tool_lines: list = []
-    for tool, _description in _CARRIER_TOOLS:
-        phases_with = _phases_with(tool, phase_map)
-        # The round itself is blocked: never advertise it as a callable phase.
-        later_phases = [p for p in phases_with if p != "pre_coordination"]
-        if not later_phases:
-            continue
-        line = f"  - `{tool}` is callable in: {', '.join(later_phases)}"
-        if tool == "schedule_patient":
-            line += "."
-            line += (
-                " Any slot-based signal must be sent in the execution phase, "
-                "when you actually have the tool."
-            )
-        tool_lines.append(line)
+    # tool_lines: list = []
+    # for tool, _description in _CARRIER_TOOLS:
+    #     phases_with = _phases_with(tool, phase_map)
+    #     # The round itself is blocked: never advertise it as a callable phase.
+    #     later_phases = [p for p in phases_with if p != "pre_coordination"]
+    #     if not later_phases:
+    #         continue
+    #     line = f"  - `{tool}` is callable in: {', '.join(later_phases)}"
+    #     if tool == "schedule_patient":
+    #         line += "."
+    #         line += (
+    #             " Any slot-based signal must be sent in the execution phase, "
+    #             "when you actually have the tool."
+    #         )
+    #     tool_lines.append(line)
 
-    if not tool_lines:
-        return ""
+    # if not tool_lines:
+    #     return ""
 
-    header = "TOOL-CALL PHASE AVAILABILITY (design your protocol around this):"
-    blocked = (
-        "- Every environment tool is BLOCKED in this round, so you cannot use "
-        "any of them now."
-    )
-    closing = (
-        "- Agree a protocol that only uses a tool in the phase you named, and "
-        "that you can still execute later."
-    )
-    return "\n".join([header, blocked, *tool_lines, closing])
+    # header = "TOOL-CALL PHASE AVAILABILITY (design your protocol around this):"
+    # blocked = (
+    #     "- Every environment tool is BLOCKED in this round, so you cannot use "
+    #     "any of them now."
+    # )
+    # closing = (
+    #     "- Agree a protocol that only uses a tool in the phase you named, and "
+    #     "that you can still execute later."
+    # )
+    prompt = "TOOL-CALL PHASE AVAILABILITY (design your protocol around this):\n- Every environment tool is temporarily BLOCKED in this round, but you will gain access to them once the first iteration starts:\n" \
+    "- During planning, you will be able to use the transfer_resources tool. \n" \
+    "- During execution, you will be able to use the schedule_patient tool."
+    return prompt
 
 
 def _call_prompt_fn(
