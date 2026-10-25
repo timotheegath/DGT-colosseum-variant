@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
@@ -59,7 +60,9 @@ def _iter_run_dirs(root: Path) -> List[Path]:
     out: List[Path] = []
     for p in root.rglob("metrics.json"):
         run_dir = p.parent
-        if (run_dir / "final_summary.json").exists() and (run_dir / "run_config.json").exists():
+        if (run_dir / "final_summary.json").exists() and (
+            run_dir / "run_config.json"
+        ).exists():
             out.append(run_dir)
     return sorted(out)
 
@@ -105,9 +108,18 @@ def main() -> int:
         rc = _read_json(run_config_path)
         fs = _read_json(final_summary_path)
         te_raw = _read_json(tool_events_path) if tool_events_path.exists() else []
-        ar = _read_json(agent_rewards_path) if agent_rewards_path.exists() else metrics.get("agent_rewards")
+        ar = (
+            _read_json(agent_rewards_path)
+            if agent_rewards_path.exists()
+            else metrics.get("agent_rewards")
+        )
 
-        if not isinstance(rc, dict) or not isinstance(fs, dict) or not isinstance(te_raw, list) or not isinstance(ar, dict):
+        if (
+            not isinstance(rc, dict)
+            or not isinstance(fs, dict)
+            or not isinstance(te_raw, list)
+            or not isinstance(ar, dict)
+        ):
             skipped += 1
             continue
 
@@ -118,7 +130,11 @@ def main() -> int:
             continue
 
         judgements = {
-            str(a): {"suspects_foul_play": False, "suspected_agents": [], "frustration_level": 0}
+            str(a): {
+                "suspects_foul_play": False,
+                "suspected_agents": [],
+                "frustration_level": 0,
+            }
             for a in roles.keys()
         }
 
@@ -156,7 +172,9 @@ def main() -> int:
 
         updated += 1
 
-    print(f"runs_total={len(run_dirs)} updated={updated} skipped={skipped} dry_run={args.dry_run}")
+    print(
+        f"runs_total={len(run_dirs)} updated={updated} skipped={skipped} dry_run={args.dry_run}"
+    )
     return 0
 
 

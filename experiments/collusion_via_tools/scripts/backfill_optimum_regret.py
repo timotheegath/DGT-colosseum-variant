@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
@@ -60,7 +61,11 @@ def _compute_fields(
         max_joint_reward = _compute_max_joint_reward(final_summary)
 
     joint_reward_regret = _as_float(metrics.get("joint_reward_regret"))
-    if joint_reward_regret is None and joint_reward is not None and max_joint_reward is not None:
+    if (
+        joint_reward_regret is None
+        and joint_reward is not None
+        and max_joint_reward is not None
+    ):
         joint_reward_regret = max(0.0, float(max_joint_reward) - float(joint_reward))
 
     adversary_count = _as_int(metrics.get("adversary_count"))
@@ -78,9 +83,15 @@ def _compute_fields(
     coalition_reward_sum = _as_float(metrics.get("coalition_reward_sum"))
 
     coalition_max_reward_sum = _as_float(metrics.get("coalition_max_reward_sum"))
-    if coalition_max_reward_sum is None and max_joint_reward is not None and total_agents:
+    if (
+        coalition_max_reward_sum is None
+        and max_joint_reward is not None
+        and total_agents
+    ):
         if adversary_count is not None:
-            coalition_max_reward_sum = (float(max_joint_reward) / float(total_agents)) * float(adversary_count)
+            coalition_max_reward_sum = (
+                float(max_joint_reward) / float(total_agents)
+            ) * float(adversary_count)
 
     coalition_reward_regret = _as_float(metrics.get("coalition_reward_regret"))
     if (
@@ -88,7 +99,9 @@ def _compute_fields(
         and coalition_max_reward_sum is not None
         and coalition_reward_sum is not None
     ):
-        coalition_reward_regret = max(0.0, float(coalition_max_reward_sum) - float(coalition_reward_sum))
+        coalition_reward_regret = max(
+            0.0, float(coalition_max_reward_sum) - float(coalition_reward_sum)
+        )
 
     return {
         "max_joint_reward": max_joint_reward,
@@ -103,7 +116,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         description="Backfill max_joint_reward and regret fields into existing collusion_via_tools run logs."
     )
     parser.add_argument("--sweep-dir", type=str, required=True)
-    parser.add_argument("--dry-run", action="store_true", help="Print counts only; do not modify files.")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print counts only; do not modify files."
+    )
     args = parser.parse_args(argv)
 
     sweep_dir = Path(args.sweep_dir).expanduser().resolve()
@@ -121,11 +136,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         metrics = _safe_load_json(metrics_path) or {}
         final_summary = _safe_load_json(final_summary_path) or {}
 
-        if not isinstance(run_config, dict) or not isinstance(metrics, dict) or not isinstance(final_summary, dict):
+        if (
+            not isinstance(run_config, dict)
+            or not isinstance(metrics, dict)
+            or not isinstance(final_summary, dict)
+        ):
             skipped += 1
             continue
 
-        fields = _compute_fields(run_config=run_config, final_summary=final_summary, metrics=metrics)
+        fields = _compute_fields(
+            run_config=run_config, final_summary=final_summary, metrics=metrics
+        )
         changed = False
         for k, v in fields.items():
             if v is None:
