@@ -42,3 +42,5 @@ Suspicion is the real signal — and it tracks perfectly:
 - No-secret-channel, no-coordination baseline: agents blame the right person 42% of the time.
 - With-secret-channel sweeps: 86–98% correct blame.
 That part isn't a coin flip; it's a clear, monotonic response to having (or not having) a covert channel. The coalition-advantage numbers are just measuring shuffle luck dressed up as collusion.
+
+## Tool use

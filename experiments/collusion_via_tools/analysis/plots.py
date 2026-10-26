@@ -43,8 +43,6 @@ SUBDIR_BOX = "sweep_metrics"
 SUBDIR_SCATTER = "judge_vs_advantage"
 SUBDIR_DELTA = "judge_vs_advantage_delta"
 
-LEGACY_MODES = ("box", "scatter", "scatter-delta")
-
 
 def _plots_outputs_base() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "plots_outputs")
@@ -232,32 +230,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=300,
         help="Raster resolution (default 300).",
     )
-    parser.add_argument(
-        "--legacy-mode",
-        dest="legacy_mode",
-        choices=LEGACY_MODES,
-        default=None,
-        help=(
-            "Internal: translate a deprecated single-plot CLI into the combined "
-            "flag set (box / scatter / scatter-delta). Used by the old scripts' "
-            "shims."
-        ),
-    )
-    args = parser.parse_args(argv)
-
-    # Translate the legacy single-plot selection into the --no-* flags so the
-    # translation logic lives in exactly one place.
-    if args.legacy_mode == "box":
-        args.no_scatter = True
-        args.no_scatter_delta = True
-    elif args.legacy_mode == "scatter":
-        args.no_box = True
-        args.no_scatter_delta = True
-    elif args.legacy_mode == "scatter-delta":
-        args.no_box = True
-        args.no_scatter = True
-
-    return args
+    return parser.parse_args(argv)
 
 
 # --------------------------------------------------------------------------- #
@@ -265,18 +238,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # --------------------------------------------------------------------------- #
 
 
-def _type_out_dir(args: argparse.Namespace, kind: str, legacy: bool) -> str:
+def _type_out_dir(args: argparse.Namespace, kind: str) -> str:
     """Resolve the output directory for one plot type."""
-    if legacy:
-        # The old scripts wrote directly to --out (or their own default dir).
-        if args.out:
-            return args.out
-        if kind == "box":
-            return plot_box.default_out_dir()
-        if kind == "scatter":
-            return plot_scatter.default_out_dir()
-        return args.significance_out or plot_delta.default_out_dir()
-
     base = args.out or _plots_outputs_base()
     if kind == "box":
         return os.path.join(base, SUBDIR_BOX)
@@ -760,13 +723,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     order = [token.strip() for token in (args.order or "").split(",") if token.strip()]
-    legacy = args.legacy_mode is not None
     primary = _primary_kind(box_active, scatter_active, delta_active)
 
     written: list[str] = []
 
     if box_active:
-        out_dir = _type_out_dir(args, "box", legacy)
+        out_dir = _type_out_dir(args, "box")
         csv_path = (
             args.csv_path
             if (primary == "box" and args.csv_path)
@@ -788,7 +750,7 @@ def main(argv: list[str] | None = None) -> int:
             return code
 
     if scatter_active:
-        out_dir = _type_out_dir(args, "scatter", legacy)
+        out_dir = _type_out_dir(args, "scatter")
         csv_path = (
             args.csv_path
             if (primary == "scatter" and args.csv_path)
@@ -812,7 +774,7 @@ def main(argv: list[str] | None = None) -> int:
             return code
 
     if delta_active:
-        out_dir = _type_out_dir(args, "delta", legacy)
+        out_dir = _type_out_dir(args, "delta")
         csv_path = (
             args.csv_path
             if (primary == "delta" and args.csv_path)

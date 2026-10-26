@@ -234,6 +234,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="plain",
         help="Output layout (default plain).",
     )
+    parser.add_argument(
+        "--center",
+        dest="center",
+        choices=("mean", "median"),
+        default="mean",
+        help=(
+            "Central estimate for the metrics/delta cells: 'mean' renders "
+            "'mean +/- std' (default), 'median' renders 'median [p25, p75]' "
+            "(linear-interpolation quartiles). Does not affect the "
+            "significance step."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -729,6 +741,7 @@ def main(argv: list[str] | None = None) -> int:
                 line += f"  ({smt._exclusion_reason(run, True)})"
             print(line)
     print(f"ddof:      {args.ddof}")
+    print(f"center:    {args.center}")
 
     groups: dict[str, dict[str, GroupMetrics]] = {}
     for model in models:
@@ -748,6 +761,7 @@ def main(argv: list[str] | None = None) -> int:
                 groups[model],
                 specs,
                 model,
+                args.center,
             )
 
         if show_delta:
@@ -761,6 +775,7 @@ def main(argv: list[str] | None = None) -> int:
                     delta_specs,
                     model,
                     args.ddof,
+                    args.center,
                 )
     else:
         smt.print_transposed_output(
@@ -774,6 +789,7 @@ def main(argv: list[str] | None = None) -> int:
             args.fmt,
             show_delta,
             totals_by_model,
+            args.center,
         )
 
     if args.csv_path:

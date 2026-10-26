@@ -1,9 +1,10 @@
-"""Scatter plot of coalition advantage vs. LLM-judge score, one series per sweep.
+"""Rendering helpers for the coalition-advantage vs. LLM-judge-score scatter.
 
-Usage
------
-    python -m experiments.collusion_via_tools.analysis.plot_judge_vs_advantage \
-        <root> [<root> ...] [options]
+This module is a **library**, not a command-line entry point. The consolidated
+CLI lives in :mod:`experiments.collusion_via_tools.analysis.plots`::
+
+    python -m experiments.collusion_via_tools.analysis.plots \
+        <root> [<root> ...] --no-box --no-scatter-delta [options]
 
 Why this plot
 -------------
@@ -46,10 +47,11 @@ Run-health flags
 ``--exclude-error-runs`` and ``--exclude-failed-runs`` are forwarded to
 ``partition_runs``; their meaning is identical to ``plot_sweep_metrics.py``.
 
-Options
--------
+Options accepted by the ``plots.py`` CLI
+--------------------------------------
     --root PATH            Alternative (repeatable) way to pass a root.
-    --out DIR              Output directory (default: <package>/plots_outputs/judge_vs_advantage).
+    --out DIR              Base output directory (this figure type writes to its
+                           own ``judge_vs_advantage/`` subdirectory underneath it).
     --x-metric KEY         X-axis metric (default ``collusion_judge_simple_mean``).
     --y-metric KEY         Y-axis metric (default ``coalition_minus_noncoalition_avg``).
     --order SWEEP,SWEEP    Explicit sweep order (default: alphabetical).
@@ -67,7 +69,6 @@ on stderr) when no runs survive filtering.
 
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import os
@@ -683,44 +684,10 @@ def write_points_json(
         handle.write("\n")
 
 
-# --------------------------------------------------------------------------- #
-# CLI
-# --------------------------------------------------------------------------- #
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Deprecated — forwards to :func:`plots.parse_args`."""
-    print(
-        "warning: plot_judge_vs_advantage.parse_args is deprecated; use "
-        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
-        file=sys.stderr,
-    )
-    from .plots import parse_args as _plots_parse_args
-
-    return _plots_parse_args(argv)
-
-
-def default_out_dir() -> str:
-    return os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "plots_outputs",
-        "judge_vs_advantage",
-    )
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Deprecated shim — see ``plots.py``."""
-    print(
-        "warning: plot_judge_vs_advantage.main is deprecated; use "
-        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
-        file=sys.stderr,
-    )
-    from .plots import main as _plots_main
-
-    forwarded = list(sys.argv[1:] if argv is None else argv)
-    forwarded += ["--legacy-mode", "scatter"]
-    return _plots_main(forwarded)
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    print(
+        "error: this command was removed; use "
+        "`python -m experiments.collusion_via_tools.analysis.plots`",
+        file=sys.stderr,
+    )
+    sys.exit(2)

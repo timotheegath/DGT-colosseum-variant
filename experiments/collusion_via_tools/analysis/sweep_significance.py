@@ -1,5 +1,13 @@
 """Pairwise statistical-significance analysis for sweep_metrics_stats.csv.
 
+This module is a **library**, not a command-line entry point. The consolidated
+CLI lives in :mod:`experiments.collusion_via_tools.analysis.tables`, which
+selects the mode from the flags:
+
+    python -m experiments.collusion_via_tools.analysis.tables --summary-csv CSV
+    python -m experiments.collusion_via_tools.analysis.tables --delta-csv CSV
+    python -m experiments.collusion_via_tools.analysis.tables <root> --reference SWEEP
+
 Two modes:
 
 1. **Summary-stats mode** (default, --summary-csv). Computes Welch's t-test,
@@ -40,19 +48,18 @@ Summary-stats mode (default):
   Reads:  experiments/collusion_via_tools/analysis/plots_outputs/sweep_metrics/sweep_metrics_stats.csv
   Writes: experiments/collusion_via_tools/analysis/plots_outputs/sweep_metrics/sweep_significance.csv
           experiments/collusion_via_tools/analysis/plots_outputs/sweep_metrics/sweep_significance.md
-  Run:    .venv/bin/python -m experiments.collusion_via_tools.analysis.sweep_significance
+  Run:    .venv/bin/python -m experiments.collusion_via_tools.analysis.tables --summary-csv <path>
 
 Per-run-delta mode:
   Reads:  --delta-csv PATH (typically plots_outputs/judge_vs_advantage_delta/judge_vs_advantage_delta_points.csv)
   Writes: <delta-csv-dir>/sweep_significance_delta.csv
           <delta-csv-dir>/sweep_significance_delta.md
-  Run:    .venv/bin/python -m experiments.collusion_via_tools.analysis.sweep_significance \
+  Run:    .venv/bin/python -m experiments.collusion_via_tools.analysis.tables \
               --delta-csv experiments/collusion_via_tools/analysis/plots_outputs/judge_vs_advantage_delta/judge_vs_advantage_delta_points.csv
 """
 
 from __future__ import annotations
 
-import argparse
 import csv
 import math
 import os
@@ -683,18 +690,6 @@ def run_delta_mode(delta_csv: Path, out_dir: Path) -> None:
     print(f"Wrote {md_path}")
 
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Deprecated — forwards to :func:`tables.parse_args`."""
-    print(
-        "warning: sweep_significance._parse_args is deprecated; use "
-        "`python -m experiments.collusion_via_tools.analysis.tables` instead",
-        file=sys.stderr,
-    )
-    from .tables import parse_args as _tables_parse_args
-
-    return _tables_parse_args(argv)
-
-
 # --------------------------------------------------------------------------- #
 # Sibling import for the one-step root mode (load_runs + augmentation)
 # --------------------------------------------------------------------------- #
@@ -870,37 +865,6 @@ def run_root_delta_mode(
     run_delta_mode(points_csv, out_dir)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Deprecated shim -- see ``tables.py``.
-
-    The legacy three-mode behaviour is selected automatically by
-    ``tables._resolve_significance_mode`` (``--delta-csv`` -> delta,
-    ``--reference`` -> root, ``--summary-csv`` / default stats CSV -> summary).
-    """
-    print(
-        "warning: sweep_significance.main is deprecated; use "
-        "`python -m experiments.collusion_via_tools.analysis.tables` "
-        "with --significance-mode {summary,delta,root}",
-        file=sys.stderr,
-    )
-    from .tables import main as _tables_main
-    from .tables import parse_args as _tables_parse_args
-
-    forwarded = list(sys.argv[1:] if argv is None else argv)
-    # A legacy bare invocation (no root, no --reference, no --delta-csv)
-    # defaulted to summary-stats mode on the package stats CSV; make that
-    # explicit so the consolidated entry point does not demand a root.
-    try:
-        ns = _tables_parse_args(forwarded)
-    except SystemExit:
-        ns = None
-    if ns is not None and not (
-        ns.root or ns.root_opt or ns.reference or ns.delta_csv or ns.summary_csv
-    ):
-        forwarded += ["--summary-csv", str(STATS_CSV)]
-    return _tables_main(forwarded)
-
-
 def _fmt(v: object, decimals: int = 3) -> str:
     if isinstance(v, float) and not math.isfinite(v):
         return "—"
@@ -918,4 +882,9 @@ def _fmt_p(p: object) -> str:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    print(
+        "error: this command was removed; use "
+        "`python -m experiments.collusion_via_tools.analysis.tables`",
+        file=sys.stderr,
+    )
+    sys.exit(2)

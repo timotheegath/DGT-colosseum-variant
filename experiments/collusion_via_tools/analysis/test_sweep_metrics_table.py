@@ -20,6 +20,17 @@ from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 
 from experiments.collusion_via_tools.analysis import sweep_metrics_table as smt
+from experiments.collusion_via_tools.analysis import tables
+
+
+def _run_tables(argv: list[str]) -> int:
+    """Invoke the consolidated ``tables`` CLI with the significance step off.
+
+    The table tests must not depend on whether a summary-stats CSV happens to
+    exist under the package's ``plots_outputs/`` directory, so the
+    significance step is always skipped here.
+    """
+    return tables.main([*argv, "--no-significance"])
 
 
 def _make_run(
@@ -195,7 +206,7 @@ class PooledProvenanceTest(unittest.TestCase):
             self._build(root)
             out = io.StringIO()
             with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                code = smt.main([root])
+                code = _run_tables([root])
             self.assertEqual(code, 0)
             self.assertIn("20260101-000000; 20260102-000000", out.getvalue())
 
@@ -204,7 +215,7 @@ class PooledProvenanceTest(unittest.TestCase):
             self._build(root)
             csv_path = os.path.join(root, "out.csv")
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                smt.main([root, "--csv", csv_path])
+                _run_tables([root, "--csv", csv_path])
             with open(csv_path, newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(
@@ -222,7 +233,7 @@ class PooledProvenanceTest(unittest.TestCase):
             self._build(root)
             json_path = os.path.join(root, "out.json")
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                smt.main([root, "--json", json_path])
+                _run_tables([root, "--json", json_path])
             with open(json_path, encoding="utf-8") as handle:
                 payload = json.load(handle)
             group = payload["groups"]["m"]["shared"]
@@ -242,7 +253,7 @@ class PooledProvenanceTest(unittest.TestCase):
             self._build(root)
             out = io.StringIO()
             with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                code = smt.main([root, "--source", "20260102-000000"])
+                code = _run_tables([root, "--source", "20260102-000000"])
             self.assertEqual(code, 0)
             self.assertIn("shared", out.getvalue())
 
@@ -261,7 +272,7 @@ class MultiRootCliTest(unittest.TestCase):
 
             out = io.StringIO()
             with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                code = smt.main([root_a, root_b, "--csv", csv_path])
+                code = _run_tables([root_a, root_b, "--csv", csv_path])
 
             self.assertEqual(code, 0)
             text = out.getvalue()
@@ -290,7 +301,7 @@ class MultiRootCliTest(unittest.TestCase):
 
             out = io.StringIO()
             with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                code = smt.main(["--root", root_a, "--root", root_b])
+                code = _run_tables(["--root", root_a, "--root", root_b])
 
             self.assertEqual(code, 0)
             self.assertIn("sweep_one", out.getvalue())
@@ -299,14 +310,14 @@ class MultiRootCliTest(unittest.TestCase):
     def test_no_root_errors(self) -> None:
         err = io.StringIO()
         with redirect_stderr(err), redirect_stdout(io.StringIO()):
-            code = smt.main([])
+            code = _run_tables([])
         self.assertEqual(code, 2)
         self.assertIn("a root path is required", err.getvalue())
 
     def test_missing_roots_reported_together(self) -> None:
         err = io.StringIO()
         with redirect_stderr(err), redirect_stdout(io.StringIO()):
-            code = smt.main(["/nope/one", "/nope/two"])
+            code = _run_tables(["/nope/one", "/nope/two"])
         self.assertEqual(code, 2)
         self.assertIn("/nope/one", err.getvalue())
         self.assertIn("/nope/two", err.getvalue())
@@ -416,7 +427,7 @@ class ExcludeErrorRunsCliTest(unittest.TestCase):
     def _run(self, argv: list[str]) -> str:
         out = io.StringIO()
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
-            code = smt.main(argv)
+            code = _run_tables(argv)
         self.assertEqual(code, 0)
         return out.getvalue()
 
@@ -544,7 +555,7 @@ class ExcludeFailedRunsCliTest(unittest.TestCase):
     def _run(self, argv: list[str]) -> str:
         out = io.StringIO()
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
-            code = smt.main(argv)
+            code = _run_tables(argv)
         self.assertEqual(code, 0)
         return out.getvalue()
 
@@ -592,6 +603,235 @@ class ExcludeFailedRunsCliTest(unittest.TestCase):
             self.assertIsInstance(agents, list)
 
 
+def _fake_run(sweep: str, seed: int, metrics: dict[str, Any]) -> smt.RunData:
+    """Build a ``RunData`` in memory (seed parsed from ``run_seed<S>``)."""
+    return smt.RunData(
+        model="m",
+        sweep=sweep,
+        source="20260101-000000",
+        source_label="20260101-000000_tag",
+        source_path=os.path.join("run_1", "20260101-000000_tag"),
+        run_id=f"run_seed{seed}",
+        run_dir=f"/tmp/opencode/fake/{sweep}/run_seed{seed}",
+        metrics=metrics,
+        run_config=None,
+        costs=None,
+    )
+
+
+class AggregateRobustStatsTest(unittest.TestCase):
+    """``aggregate`` reports median and linear-interpolation quartiles."""
+
+    def test_known_quartiles(self) -> None:
+        agg = smt.aggregate([1.0, 2.0, 3.0, 4.0], n_missing=0, ddof=1)
+        self.assertEqual(agg.median, 2.5)
+        self.assertEqual(agg.p25, 1.75)
+        self.assertEqual(agg.p75, 3.25)
+
+    def test_quartiles_match_inclusive_linear_convention(self) -> None:
+        # numpy.percentile([1, 2, 3, 4, 5], [25, 75], method="linear") -> 2, 4.
+        agg = smt.aggregate([1.0, 2.0, 3.0, 4.0, 5.0], n_missing=0, ddof=1)
+        self.assertEqual(agg.median, 3.0)
+        self.assertEqual(agg.p25, 2.0)
+        self.assertEqual(agg.p75, 4.0)
+
+    def test_single_value(self) -> None:
+        agg = smt.aggregate([7.0], n_missing=0, ddof=1)
+        self.assertEqual(agg.median, 7.0)
+        self.assertEqual(agg.p25, 7.0)
+        self.assertEqual(agg.p75, 7.0)
+
+    def test_empty(self) -> None:
+        agg = smt.aggregate([], n_missing=3, ddof=1)
+        self.assertIsNone(agg.mean)
+        self.assertIsNone(agg.median)
+        self.assertIsNone(agg.p25)
+        self.assertIsNone(agg.p75)
+
+
+class MetricsTableCenterTest(unittest.TestCase):
+    """Table B renders ``mean +/- std`` or ``median [p25, p75]`` by centre."""
+
+    def _setup(self) -> tuple[smt.MetricSpec, dict[str, smt.GroupMetrics]]:
+        spec = smt.METRICS_BY_KEY["joint_reward"]
+        agg = smt.aggregate([1.0, 2.0, 3.0, 4.0], n_missing=0, ddof=1)
+        groups = {
+            "sweepA": smt.GroupMetrics(n_runs=4, aggregates={spec.key: agg}),
+        }
+        return spec, groups
+
+    def _render(self, center: str) -> str:
+        spec, groups = self._setup()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            smt.print_metrics_table(["sweepA"], groups, [spec], "m", center)
+        return out.getvalue()
+
+    def test_median_mode_cell(self) -> None:
+        spec, _ = self._setup()
+        text = self._render("median")
+        expected = (
+            f"{smt.format_value(spec.fmt, 2.5)} "
+            f"[{smt.format_value(spec.fmt, 1.75)}, {smt.format_value(spec.fmt, 3.25)}]"
+        )
+        self.assertIn(expected, text)
+        self.assertIn("Table B -- metrics (median [p25, p75])", text)
+
+    def test_mean_mode_cell_unchanged(self) -> None:
+        spec, groups = self._setup()
+        agg = groups["sweepA"].aggregates[spec.key]
+        text = self._render("mean")
+        expected = (
+            f"{smt.format_value(spec.fmt, agg.mean)} +/- "
+            f"{smt.format_value(spec.fmt, agg.std)}"
+        )
+        self.assertIn(expected, text)
+        self.assertIn("Table B -- metrics (mean +/- std)", text)
+
+
+class DeltaTableCenterTest(unittest.TestCase):
+    """Table C renders the median of the paired diffs in median mode."""
+
+    def _groups(self) -> tuple[smt.SweepGroup, smt.SweepGroup, smt.MetricSpec]:
+        spec = smt.METRICS_BY_KEY["coalition_minus_noncoalition_avg"]
+        key = "coalition_minus_noncoalition_avg"
+        ref_runs = [_fake_run("baseline", seed, {key: 0.0}) for seed in (0, 1, 2)]
+        sweep_runs = [
+            _fake_run("collusion", seed, {key: float(10 * (seed + 1))})
+            for seed in (0, 1, 2)
+        ]
+        ref = smt.SweepGroup(
+            label="baseline",
+            sweep="baseline",
+            sources=["20260101-000000"],
+            source_labels=["20260101-000000_tag"],
+            source_paths=[os.path.join("run_1", "20260101-000000_tag")],
+            runs=ref_runs,
+        )
+        other = smt.SweepGroup(
+            label="collusion",
+            sweep="collusion",
+            sources=["20260101-000000"],
+            source_labels=["20260101-000000_tag"],
+            source_paths=[os.path.join("run_1", "20260101-000000_tag")],
+            runs=sweep_runs,
+        )
+        return ref, other, spec
+
+    def test_median_cell_keeps_k_suffix(self) -> None:
+        ref, other, spec = self._groups()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            smt.print_delta_table([ref, other], ref, [spec], "m", 1, "median")
+        text = out.getvalue()
+        # Paired diffs are [10, 20, 30]: median 20, p25 15, p75 25.
+        expected = (
+            f"{smt.format_value(spec.fmt, 20.0)} "
+            f"[{smt.format_value(spec.fmt, 15.0)}, {smt.format_value(spec.fmt, 25.0)}]"
+            f" (k=3)"
+        )
+        self.assertIn(expected, text)
+        self.assertIn("median [p25, p75]", text)
+
+    def test_mean_cell_unchanged(self) -> None:
+        ref, other, spec = self._groups()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            smt.print_delta_table([ref, other], ref, [spec], "m", 1, "mean")
+        text = out.getvalue()
+        expected = (
+            f"{smt.format_value(spec.fmt, 20.0)} +/- "
+            f"{smt.format_value(spec.fmt, 10.0)} (k=3)"
+        )
+        self.assertIn(expected, text)
+
+
+class CenterCliTest(unittest.TestCase):
+    """``--center`` flag plumbing, CSV columns and JSON keys."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        _make_run(
+            self.root,
+            "",
+            ["m"],
+            "sweep_a",
+            "run_seed0",
+            metrics={"meeting_outcome": {"joint_reward": 1.0}},
+        )
+        _make_run(
+            self.root,
+            "",
+            ["m"],
+            "sweep_a",
+            "run_seed1",
+            metrics={"meeting_outcome": {"joint_reward": 2.0}},
+        )
+
+    def _run(self, argv: list[str]) -> str:
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = _run_tables(argv)
+        self.assertEqual(code, 0)
+        return out.getvalue()
+
+    def test_default_center_is_mean(self) -> None:
+        text = self._run([self.root])
+        self.assertIn("center:    mean", text)
+        self.assertIn("mean +/- std", text)
+        self.assertNotIn("median [p25, p75]", text)
+
+    def test_center_median_accepted(self) -> None:
+        text = self._run([self.root, "--center", "median"])
+        self.assertIn("center:    median", text)
+        self.assertIn("median [p25, p75]", text)
+
+    def test_invalid_center_rejected(self) -> None:
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                _run_tables([self.root, "--center", "mode"])
+
+    def test_csv_appends_columns(self) -> None:
+        csv_path = os.path.join(self.root, "out.csv")
+        self._run([self.root, "--center", "median", "--csv", csv_path])
+        with open(csv_path, newline="", encoding="utf-8") as handle:
+            header = next(csv.reader(handle))
+        self.assertEqual(
+            header,
+            [
+                "model",
+                "source",
+                "source_path",
+                "sweep",
+                "metric",
+                "label",
+                "n",
+                "n_missing",
+                "mean",
+                "std",
+                "min",
+                "max",
+                "median",
+                "p25",
+                "p75",
+            ],
+        )
+
+    def test_json_gains_keys(self) -> None:
+        json_path = os.path.join(self.root, "out.json")
+        self._run([self.root, "--center", "median", "--json", json_path])
+        with open(json_path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        metric = payload["groups"]["m"]["sweep_a"]["metrics"]["joint_reward"]
+        for key in ("median", "p25", "p75"):
+            self.assertIn(key, metric)
+        self.assertEqual(metric["median"], 1.5)
+        self.assertEqual(metric["p25"], 1.25)
+        self.assertEqual(metric["p75"], 1.75)
+
+
 class SingleRootTest(unittest.TestCase):
     """Section 9: single-root behaviour keeps one plain-labelled group per sweep."""
 
@@ -610,7 +850,7 @@ class SingleRootTest(unittest.TestCase):
             _make_run(root, "", ["m"], "sweep_a", "r1")
             out = io.StringIO()
             with redirect_stdout(out), redirect_stderr(io.StringIO()):
-                code = smt.main([root])
+                code = _run_tables([root])
             self.assertEqual(code, 0)
             text = out.getvalue()
             self.assertIn("root:", text)

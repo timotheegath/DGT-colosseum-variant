@@ -1,9 +1,10 @@
-"""Plot the distribution of headline metrics per sweep for one or more sweep roots.
+"""Rendering helpers for the per-sweep metric distribution panels.
 
-Usage
------
-    python -m experiments.collusion_via_tools.analysis.plot_sweep_metrics \
-        <root> [<root> ...] [options]
+This module is a **library**, not a command-line entry point. The consolidated
+CLI lives in :mod:`experiments.collusion_via_tools.analysis.plots`::
+
+    python -m experiments.collusion_via_tools.analysis.plots \
+        <root> [<root> ...] --no-scatter --no-scatter-delta [options]
 
 Why a hybrid box plot?
 ----------------------
@@ -60,10 +61,11 @@ Setting both applies the union.  The stats, the per-panel means and the
 runs-per-sweep detail line then use the kept runs only, and the exclusions are
 reported on stdout and under ``excluded_runs`` in the JSON output.
 
-Options
--------
+Options accepted by the ``plots.py`` CLI
+--------------------------------------
     --root PATH            Alternative (repeatable) way to pass a root.
-    --out DIR              Output directory (default: <package>/plots_outputs/sweep_metrics).
+    --out DIR              Base output directory (this panel type writes to its
+                           own ``sweep_metrics/`` subdirectory underneath it).
     --metrics a,b,c        Comma-separated metric subset (default: the six
                            headline metrics, including the post-hoc
                            ``collusion_judge_simple_mean`` Likert judge score
@@ -86,7 +88,6 @@ on stderr) when a selected metric has no values for any sweep.
 
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import math
@@ -846,42 +847,10 @@ def write_stats_json(
         handle.write("\n")
 
 
-# --------------------------------------------------------------------------- #
-# CLI
-# --------------------------------------------------------------------------- #
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Deprecated — forwards to :func:`plots.parse_args`."""
-    print(
-        "warning: plot_sweep_metrics.parse_args is deprecated; use "
-        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
-        file=sys.stderr,
-    )
-    from .plots import parse_args as _plots_parse_args
-
-    return _plots_parse_args(argv)
-
-
-def default_out_dir() -> str:
-    return os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "plots_outputs", "sweep_metrics"
-    )
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Deprecated shim — see ``plots.py``."""
-    print(
-        "warning: plot_sweep_metrics.main is deprecated; use "
-        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
-        file=sys.stderr,
-    )
-    from .plots import main as _plots_main
-
-    forwarded = list(sys.argv[1:] if argv is None else argv)
-    forwarded += ["--legacy-mode", "box"]
-    return _plots_main(forwarded)
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    print(
+        "error: this command was removed; use "
+        "`python -m experiments.collusion_via_tools.analysis.plots`",
+        file=sys.stderr,
+    )
+    sys.exit(2)

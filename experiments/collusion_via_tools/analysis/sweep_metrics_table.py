@@ -1,11 +1,13 @@
-"""Print a table of key metrics (mean +/- std) per sweep for one or more sweep roots.
+"""Shared plumbing for the sweep metric tables: metric catalogue, run discovery,
+grouping and run-health partitioning.
 
-Usage
------
-    python -m experiments.collusion_via_tools.analysis.sweep_metrics_table <root> [<root> ...] [options]
+This module is a **library**, not a command-line entry point. The consolidated
+CLI lives in :mod:`experiments.collusion_via_tools.analysis.tables`::
 
-Arguments
----------
+    python -m experiments.collusion_via_tools.analysis.tables <root> [<root> ...] [options]
+
+Arguments accepted by that CLI
+------------------------------
     <root> ...              One or more experiment output roots. A root may be the
                             timestamped directory that contains ``runs/``, the
                             ``runs/`` directory itself, or any ancestor that nests
@@ -22,8 +24,8 @@ pooled into a single group (reported with a warning on stderr). Source
 information is surfaced only in Table A's ``Source`` column and in the CSV /
 JSON outputs.
 
-Options
--------
+Options accepted by that CLI
+----------------------------
     --root PATH             Alternative (repeatable) way to pass a root.
     --csv PATH              Write a long-format CSV of the aggregated metrics.
     --json PATH             Write a nested JSON of the aggregated metrics.
@@ -33,6 +35,10 @@ Options
                             ``headline`` expands to a preset set of headline
                             metrics and may be mixed with individual keys.
     --ddof {0,1}            Std delta degrees of freedom (default 1).
+    --center {mean,median}  Central estimate for the metrics/delta cells
+                            (default ``mean``). ``median`` renders
+                            ``median [p25, p75]`` with linear-interpolation
+                            quartiles; the significance step is unaffected.
     --reference SWEEP       Reference group label or raw sweep name for the delta
                             table.
     --no-delta              Skip the delta table.
@@ -62,7 +68,7 @@ still produced a normal outcome is a legitimate, if unusual, result and is
 kept. When both flags are set, the union applies (a run is dropped if it has an
 error turn or collapsed).
 
-The script is stdlib-only and never mutates its inputs. Malformed run
+The helpers here are stdlib-only and never mutate their inputs. Malformed run
 artifacts (missing/malformed ``metrics.json``, missing ``costs.json``,
 null metric values) are tolerated: such runs or fields are skipped or
 reported as missing rather than crashing the run.
@@ -70,7 +76,6 @@ reported as missing rather than crashing the run.
 
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import math
@@ -314,6 +319,9 @@ class Agg:
     std: float | None
     min: float | None
     max: float | None
+    median: float | None = None
+    p25: float | None = None
+    p75: float | None = None
 
 
 @dataclass
@@ -428,10 +436,31 @@ def format_value(fmt: str, value: float | None) -> str:
 
 
 def aggregate(values: list[float], n_missing: int, ddof: int) -> Agg:
-    """Aggregate a list of non-null values."""
+    """Aggregate a list of non-null values.
+
+    Alongside the mean/std/min/max this reports the robust central statistics
+    the ``--center median`` table mode uses: the ``median`` and the 25th/75th
+    percentiles (``p25``/``p75``).
+
+    The quartiles use **linear interpolation** between order statistics, i.e.
+    the same convention as ``numpy.percentile(..., method="linear")`` and
+    ``statistics.quantiles(values, n=4, method="inclusive")``. For a single
+    value ``p25 == p75 == that value``; for an empty list the median and both
+    quartiles are ``None``.
+    """
     n = len(values)
     if n == 0:
-        return Agg(n=0, n_missing=n_missing, mean=None, std=None, min=None, max=None)
+        return Agg(
+            n=0,
+            n_missing=n_missing,
+            mean=None,
+            std=None,
+            min=None,
+            max=None,
+            median=None,
+            p25=None,
+            p75=None,
+        )
     mean = statistics.fmean(values)
     if n == 1:
         std = 0.0
@@ -439,8 +468,22 @@ def aggregate(values: list[float], n_missing: int, ddof: int) -> Agg:
         std = statistics.pstdev(values, mu=mean)
     else:
         std = statistics.stdev(values, xbar=mean)
+    median = statistics.median(values)
+    if n == 1:
+        p25 = p75 = values[0]
+    else:
+        q1, _q2, q3 = statistics.quantiles(values, n=4, method="inclusive")
+        p25, p75 = q1, q3
     return Agg(
-        n=n, n_missing=n_missing, mean=mean, std=std, min=min(values), max=max(values)
+        n=n,
+        n_missing=n_missing,
+        mean=mean,
+        std=std,
+        min=min(values),
+        max=max(values),
+        median=median,
+        p25=p25,
+        p75=p75,
     )
 
 
@@ -989,10 +1032,18 @@ def compute_group_metrics(
     return result
 
 
-def _metric_cell(spec: MetricSpec, agg: Agg, n_runs: int) -> str:
+def _metric_cell(spec: MetricSpec, agg: Agg, n_runs: int, center: str = "mean") -> str:
     if agg.n == 0:
         return "n/a"
-    cell = f"{format_value(spec.fmt, agg.mean)} +/- {format_value(spec.fmt, agg.std)}"
+    if center == "median":
+        cell = (
+            f"{format_value(spec.fmt, agg.median)} "
+            f"[{format_value(spec.fmt, agg.p25)}, {format_value(spec.fmt, agg.p75)}]"
+        )
+    else:
+        cell = (
+            f"{format_value(spec.fmt, agg.mean)} +/- {format_value(spec.fmt, agg.std)}"
+        )
     if agg.n_missing > 0:
         cell += f" (n={agg.n}/{n_runs})"
     return cell
@@ -1003,8 +1054,12 @@ def print_metrics_table(
     groups: dict[str, GroupMetrics],
     specs: list[MetricSpec],
     model: str,
+    center: str = "mean",
 ) -> None:
-    print(f"\nTable B -- metrics (mean +/- std) [{model or '-'}]")
+    if center == "median":
+        print(f"\nTable B -- metrics (median [p25, p75]) [{model or '-'}]")
+    else:
+        print(f"\nTable B -- metrics (mean +/- std) [{model or '-'}]")
     headers = ["Metric"] + sweeps
     rows: list[list[str]] = []
 
@@ -1015,7 +1070,7 @@ def print_metrics_table(
         row = [spec.label]
         for sweep in sweeps:
             agg = groups[sweep].aggregates[spec.key]
-            row.append(_metric_cell(spec, agg, groups[sweep].n_runs))
+            row.append(_metric_cell(spec, agg, groups[sweep].n_runs, center))
         rows.append(row)
 
     aligns = ["l"] + ["r"] * len(sweeps)
@@ -1033,6 +1088,9 @@ class DeltaResult:
     std: float | None
     paired_n: int
     paired: bool
+    median: float | None = None
+    p25: float | None = None
+    p75: float | None = None
 
 
 def compute_delta(
@@ -1061,18 +1119,35 @@ def compute_delta(
         diffs = [sweep_by_seed[seed] - ref_by_seed[seed] for seed in paired_seeds]
         agg = aggregate(diffs, n_missing=0, ddof=ddof)
         return DeltaResult(
-            mean=agg.mean, std=agg.std, paired_n=len(paired_seeds), paired=True
+            mean=agg.mean,
+            std=agg.std,
+            paired_n=len(paired_seeds),
+            paired=True,
+            median=agg.median,
+            p25=agg.p25,
+            p75=agg.p75,
         )
 
-    # Fall back to unpaired difference of means.
+    # Fall back to unpaired difference of means. There is no per-seed pairing,
+    # so the robust paired-difference statistics do not apply and stay ``None``.
     sweep_values = [spec.getter(r.metrics, r.run_config, r.costs) for r in sweep_runs]
     ref_values = [spec.getter(r.metrics, r.run_config, r.costs) for r in ref_runs]
     sweep_clean = [v for v in sweep_values if v is not None]
     ref_clean = [v for v in ref_values if v is not None]
     if not sweep_clean or not ref_clean:
-        return DeltaResult(mean=None, std=None, paired_n=0, paired=False)
+        return DeltaResult(
+            mean=None,
+            std=None,
+            paired_n=0,
+            paired=False,
+            median=None,
+            p25=None,
+            p75=None,
+        )
     mean = statistics.fmean(sweep_clean) - statistics.fmean(ref_clean)
-    return DeltaResult(mean=mean, std=None, paired_n=0, paired=False)
+    return DeltaResult(
+        mean=mean, std=None, paired_n=0, paired=False, median=None, p25=None, p75=None
+    )
 
 
 def print_delta_table(
@@ -1081,6 +1156,7 @@ def print_delta_table(
     specs: list[MetricSpec],
     model: str,
     ddof: int,
+    center: str = "mean",
 ) -> None:
     if len(groups) <= 1:
         return
@@ -1110,7 +1186,14 @@ def print_delta_table(
                 row.append("n/a")
                 continue
             if result.paired and result.std is not None:
-                cell = f"{format_value(spec.fmt, result.mean)} +/- {format_value(spec.fmt, result.std)}"
+                if center == "median":
+                    cell = (
+                        f"{format_value(spec.fmt, result.median)} "
+                        f"[{format_value(spec.fmt, result.p25)}, "
+                        f"{format_value(spec.fmt, result.p75)}]"
+                    )
+                else:
+                    cell = f"{format_value(spec.fmt, result.mean)} +/- {format_value(spec.fmt, result.std)}"
                 cell += f" (k={result.paired_n})"
             else:
                 cell = f"{format_value(spec.fmt, result.mean)} (unpaired)"
@@ -1118,8 +1201,9 @@ def print_delta_table(
         rows.append(row)
 
     label = "paired by seed" if any_paired else "unpaired mean difference"
+    detail = f"median [p25, p75]; {label}" if center == "median" else label
     print(
-        f"\nTable C -- Delta vs {ref_label} ({label}; negative = lower than "
+        f"\nTable C -- Delta vs {ref_label} ({detail}; negative = lower than "
         f"reference) [{model or '-'}]"
     )
     aligns = ["l"] + ["r"] * len(columns)
@@ -1131,22 +1215,37 @@ def print_delta_table(
 # --------------------------------------------------------------------------- #
 
 
-def _transposed_metric_cell(spec: MetricSpec, agg: Agg, n_runs: int) -> str:
-    """Cell for the transposed metrics table: ``mean ± std`` (+ ``(n/total)``)."""
+def _transposed_metric_cell(
+    spec: MetricSpec, agg: Agg, n_runs: int, center: str = "mean"
+) -> str:
+    """Cell for the transposed metrics table: the centre (+ ``(n/total)``)."""
     if agg.n == 0:
         return "n/a"
-    cell = f"{format_value(spec.fmt, agg.mean)} ± {format_value(spec.fmt, agg.std)}"
+    if center == "median":
+        cell = (
+            f"{format_value(spec.fmt, agg.median)} "
+            f"[{format_value(spec.fmt, agg.p25)}, {format_value(spec.fmt, agg.p75)}]"
+        )
+    else:
+        cell = f"{format_value(spec.fmt, agg.mean)} ± {format_value(spec.fmt, agg.std)}"
     if agg.n_missing > 0:
         cell += f" ({agg.n}/{n_runs})"
     return cell
 
 
-def _delta_cell(result: DeltaResult, spec: MetricSpec) -> str:
+def _delta_cell(result: DeltaResult, spec: MetricSpec, center: str = "mean") -> str:
     """Cell for the transposed delta table, matching the plain delta convention."""
     if result.mean is None:
         return "n/a"
     if result.paired and result.std is not None:
-        cell = f"{format_value(spec.fmt, result.mean)} ± {format_value(spec.fmt, result.std)}"
+        if center == "median":
+            cell = (
+                f"{format_value(spec.fmt, result.median)} "
+                f"[{format_value(spec.fmt, result.p25)}, "
+                f"{format_value(spec.fmt, result.p75)}]"
+            )
+        else:
+            cell = f"{format_value(spec.fmt, result.mean)} ± {format_value(spec.fmt, result.std)}"
         return cell + f" (k={result.paired_n})"
     return f"{format_value(spec.fmt, result.mean)} (unpaired)"
 
@@ -1178,6 +1277,7 @@ def build_transposed_metrics_table(
     groups: dict[str, GroupMetrics],
     specs: list[MetricSpec],
     style: str,
+    center: str = "mean",
 ) -> str:
     headers = ["Sweep", "n"] + [spec.label for spec in specs]
     aligns = ["l", "r"] + ["r"] * len(specs)
@@ -1187,7 +1287,9 @@ def build_transposed_metrics_table(
         row = [sweep_group.label, str(group.n_runs)]
         for spec in specs:
             row.append(
-                _transposed_metric_cell(spec, group.aggregates[spec.key], group.n_runs)
+                _transposed_metric_cell(
+                    spec, group.aggregates[spec.key], group.n_runs, center
+                )
             )
         rows.append(row)
     return render_style(headers, rows, aligns, style)
@@ -1199,6 +1301,7 @@ def build_transposed_delta_table(
     delta_specs: list[MetricSpec],
     ddof: int,
     style: str,
+    center: str = "mean",
 ) -> str | None:
     if len(groups) <= 1:
         return None
@@ -1212,7 +1315,7 @@ def build_transposed_delta_table(
         row = [label]
         for spec in delta_specs:
             result = compute_delta(spec, group.runs, ref_runs, ddof)
-            row.append(_delta_cell(result, spec))
+            row.append(_delta_cell(result, spec, center))
         rows.append(row)
     return render_style(headers, rows, aligns, style)
 
@@ -1245,6 +1348,9 @@ def write_csv(
                 "std",
                 "min",
                 "max",
+                "median",
+                "p25",
+                "p75",
             ]
         )
         for model in models:
@@ -1266,6 +1372,9 @@ def write_csv(
                             "" if agg.std is None else repr(agg.std),
                             "" if agg.min is None else repr(agg.min),
                             "" if agg.max is None else repr(agg.max),
+                            "" if agg.median is None else repr(agg.median),
+                            "" if agg.p25 is None else repr(agg.p25),
+                            "" if agg.p75 is None else repr(agg.p75),
                         ]
                     )
 
@@ -1330,6 +1439,11 @@ def write_json(
                             "std": groups[model][group.label].aggregates[spec.key].std,
                             "min": groups[model][group.label].aggregates[spec.key].min,
                             "max": groups[model][group.label].aggregates[spec.key].max,
+                            "median": groups[model][group.label]
+                            .aggregates[spec.key]
+                            .median,
+                            "p25": groups[model][group.label].aggregates[spec.key].p25,
+                            "p75": groups[model][group.label].aggregates[spec.key].p75,
                         }
                         for spec in specs
                     },
@@ -1345,23 +1459,8 @@ def write_json(
 
 
 # --------------------------------------------------------------------------- #
-# CLI
+# Metric resolution helper
 # --------------------------------------------------------------------------- #
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Deprecated — kept so existing callers can introspect the namespace.
-
-    Forwards to :func:`tables.parse_args` and returns the same namespace shape.
-    """
-    print(
-        "warning: sweep_metrics_table.parse_args is deprecated; use "
-        "`python -m experiments.collusion_via_tools.analysis.tables` instead",
-        file=sys.stderr,
-    )
-    from .tables import parse_args as _tables_parse_args
-
-    return _tables_parse_args(argv)
 
 
 def resolve_metrics(metrics_arg: str | None) -> list[MetricSpec]:
@@ -1431,12 +1530,16 @@ def print_transposed_output(
     style: str,
     show_delta: bool,
     totals_by_model: dict[str, dict[str, int]] | None = None,
+    center: str = "mean",
 ) -> None:
     """Print the three tables in the transposed layout (formatted / markdown)."""
 
     def heading(text: str) -> str:
         return f"**{text}**" if style == "markdown" else text
 
+    metrics_heading = (
+        "Metrics (median [p25, p75])" if center == "median" else "Metrics (mean ± std)"
+    )
     totals_by_model = totals_by_model or {}
     blocks: list[str] = []
     for model in models:
@@ -1447,39 +1550,41 @@ def print_transposed_output(
         blocks.append(
             build_inventory_table(model_groups, style, totals_by_model.get(model))
         )
-        blocks.append(heading("Metrics (mean ± std)"))
+        blocks.append(heading(metrics_heading))
         blocks.append(
-            build_transposed_metrics_table(model_groups, groups[model], specs, style)
+            build_transposed_metrics_table(
+                model_groups, groups[model], specs, style, center
+            )
         )
         if show_delta:
             reference = resolve_reference(model_groups, requested_reference, model)
             if reference is not None:
                 table = build_transposed_delta_table(
-                    model_groups, reference, delta_specs, ddof, style
+                    model_groups, reference, delta_specs, ddof, style, center
                 )
                 if table is not None:
-                    delta_heading = (
-                        f"Delta vs {reference.label} (paired by seed; negative = "
-                        f'lower than reference; the "{reference.label} (ref)" row '
-                        f"is 0 by construction)"
-                    )
+                    if center == "median":
+                        delta_heading = (
+                            f"Delta vs {reference.label} (median [p25, p75]; paired "
+                            f"by seed; negative = lower than reference; the "
+                            f'"{reference.label} (ref)" row is 0 by construction)'
+                        )
+                    else:
+                        delta_heading = (
+                            f"Delta vs {reference.label} (paired by seed; negative = "
+                            f'lower than reference; the "{reference.label} (ref)" row '
+                            f"is 0 by construction)"
+                        )
                     blocks.append(heading(delta_heading))
                     blocks.append(table)
     print()
     print("\n\n".join(blocks))
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Deprecated shim — see ``tables.py`` for the consolidated entry point."""
+if __name__ == "__main__":
     print(
-        "warning: sweep_metrics_table.main is deprecated; use "
-        "`python -m experiments.collusion_via_tools.analysis.tables` instead",
+        "error: this command was removed; use "
+        "`python -m experiments.collusion_via_tools.analysis.tables`",
         file=sys.stderr,
     )
-    from .tables import main as _tables_main
-
-    return _tables_main(argv)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(2)

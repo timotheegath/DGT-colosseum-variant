@@ -1,9 +1,10 @@
-"""Scatter of coalition advantage vs. LLM-judge score, paired-delta vs a reference sweep.
+"""Rendering helpers for the paired-delta scatter against a reference sweep.
 
-Usage
------
-    python -m experiments.collusion_via_tools.analysis.plot_judge_vs_advantage_delta \
-        <root> [<root> ...] --reference SWEEP [options]
+This module is a **library**, not a command-line entry point. The consolidated
+CLI lives in :mod:`experiments.collusion_via_tools.analysis.plots`::
+
+    python -m experiments.collusion_via_tools.analysis.plots \
+        <root> [<root> ...] --no-box --no-scatter --reference SWEEP [options]
 
 Why this script exists alongside :mod:`plot_judge_vs_advantage`
 --------------------------------------------------------------
@@ -63,12 +64,14 @@ Run-health flags
 ``--exclude-error-runs`` and ``--exclude-failed-runs`` are forwarded to
 ``partition_runs``; their meaning is identical to the sibling scripts.
 
-Options
--------
+Options accepted by the ``plots.py`` CLI
+--------------------------------------
     --root PATH            Alternative (repeatable) way to pass a root.
-    --out DIR              Output directory (default: <package>/plots_outputs/judge_vs_advantage_delta).
-    --reference SWEEP      Reference sweep name (required). The other sweeps
-                           are deltas-vs-this-sweep, paired by seed.
+    --out DIR              Base output directory (this figure type writes to its
+                           own ``judge_vs_advantage_delta/`` subdirectory
+                           underneath it).
+    --reference SWEEP      Reference sweep name (required for this figure type).
+                           The other sweeps are deltas-vs-this-sweep, paired by seed.
     --order SWEEP,SWEEP    Explicit sweep order (default: alphabetical, ref last).
     --exclude-error-runs   Drop every run with a failed agent turn (strict).
     --exclude-failed-runs  Drop only collapsed runs (failed turn + no assignment).
@@ -84,7 +87,6 @@ Exit codes: 2 when no root is given, the root does not exist, or
 
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import os
@@ -591,44 +593,10 @@ def write_deltas_json(
         handle.write("\n")
 
 
-# --------------------------------------------------------------------------- #
-# CLI
-# --------------------------------------------------------------------------- #
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Deprecated — forwards to :func:`plots.parse_args`."""
-    print(
-        "warning: plot_judge_vs_advantage_delta.parse_args is deprecated; use "
-        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
-        file=sys.stderr,
-    )
-    from .plots import parse_args as _plots_parse_args
-
-    return _plots_parse_args(argv)
-
-
-def default_out_dir() -> str:
-    return os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "plots_outputs",
-        "judge_vs_advantage_delta",
-    )
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Deprecated shim — see ``plots.py``."""
-    print(
-        "warning: plot_judge_vs_advantage_delta.main is deprecated; use "
-        "`python -m experiments.collusion_via_tools.analysis.plots` instead",
-        file=sys.stderr,
-    )
-    from .plots import main as _plots_main
-
-    forwarded = list(sys.argv[1:] if argv is None else argv)
-    forwarded += ["--legacy-mode", "scatter-delta"]
-    return _plots_main(forwarded)
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    print(
+        "error: this command was removed; use "
+        "`python -m experiments.collusion_via_tools.analysis.plots`",
+        file=sys.stderr,
+    )
+    sys.exit(2)

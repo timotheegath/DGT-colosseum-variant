@@ -32,12 +32,15 @@ call and only **3** ran one bidirectionally.
 | `aggregate_protocols.py` | Joins the design and execution layers into the cross-run matrix; exposes `identify_colluder_set` / `augment_baseline_coalition_metrics` for the baseline-reference workflow |
 | **`tables.py`** | **Primary entry point for the tables**: prints Tables A/B/C and runs the significance modes |
 | **`plots.py`** | **Primary entry point for the figures**: hybrid box plots, raw scatter, and paired-delta scatter in one run |
+| `comm_categories.py` | Parses `comm_protocol_family.md` into per-run category membership; emits and reloads one `comm_categories.json` per sweep |
+| **`category_tables.py`** | **Primary entry point for the category-grouped tables**: the same Tables A/B/C and significance modes as `tables.py`, but grouped by communication category |
+| `category_metrics_table.py` | Category grouping + table plumbing (the `sweep_metrics_table.py` counterpart) — library only, no CLI |
 | `delta_metrics.py` | Shared per-run metric accessors (`judge_score`, `coalition_advantage`) and paired-by-seed delta computation |
-| `sweep_metrics_table.py` | *Deprecated*: table plumbing (metric catalogue, run discovery, grouping, run-health partitioning) + a thin CLI shim that forwards to `tables.py` |
-| `sweep_significance.py` | *Deprecated*: significance statistics helpers + a thin CLI shim that forwards to `tables.py` |
-| `plot_sweep_metrics.py` | *Deprecated*: box-plot rendering helpers + a thin CLI shim that forwards to `plots.py` |
-| `plot_judge_vs_advantage.py` | *Deprecated*: raw-scatter rendering helpers + a thin CLI shim that forwards to `plots.py` |
-| `plot_judge_vs_advantage_delta.py` | *Deprecated*: paired-delta rendering helpers + a thin CLI shim that forwards to `plots.py` |
+| `sweep_metrics_table.py` | Table plumbing (metric catalogue, run discovery, grouping, run-health partitioning) — library only, no CLI |
+| `sweep_significance.py` | Significance statistics helpers — library only, no CLI |
+| `plot_sweep_metrics.py` | Box-plot rendering helpers — library only, no CLI |
+| `plot_judge_vs_advantage.py` | Raw-scatter rendering helpers — library only, no CLI |
+| `plot_judge_vs_advantage_delta.py` | Paired-delta rendering helpers — library only, no CLI |
 
 ```bash
 # from the repo root
@@ -57,7 +60,9 @@ three tables:
 - **B — metrics (mean ± std)**: one row per metric, one column per sweep.
   Covers the Figure 7 headline metrics (joint reward, overall regret,
   coalition advantage, coalition regret) plus audit metrics (suspicion,
-  attribution, message counts, convergence) and token usage.
+  attribution, message counts, convergence) and token usage. Pass
+  `--center median` to render `median [p25, p75]` cells instead (see
+  *Central estimate* below).
 - **C — delta vs a reference sweep** (default `baseline_sweep`): paired
   by seed, so the comparison is within-seed. The reference sweep is included
   and labelled `<sweep> (ref)`; its deltas are 0 by construction.
@@ -69,10 +74,11 @@ three tables:
 ```
 
 Options: `--sweep NAME` (repeatable), `--source NAME` (repeatable),
-`--metrics a,b,c`, `--ddof {0,1}` (sample std by default), `--reference SWEEP`,
-`--no-delta`, `--exclude-error-runs`, `--exclude-failed-runs`, `--format
-{plain,formatted,markdown}`, plus the significance flags below. `--root` is a
-repeatable alternative to the positional `<root>...`.
+`--metrics a,b,c`, `--ddof {0,1}` (sample std by default), `--center
+{mean,median}`, `--reference SWEEP`, `--no-delta`, `--exclude-error-runs`,
+`--exclude-failed-runs`, `--format {plain,formatted,markdown}`, plus the
+significance flags below. `--root` is a repeatable alternative to the
+positional `<root>...`.
 
 Two opt-in rules drop unhealthy runs before aggregation. Both list the excluded
 runs (sweep, seed, failing agent) and turn Table A's `Runs` cell into
@@ -171,6 +177,43 @@ coalition regret, coalition/non-coalition avg reward, avg agent reward,
 suspicion and correct-blame rates). It mixes with explicit keys, e.g.
 `--metrics headline,joint_reward`.
 
+### Central estimate (`--center`)
+
+Table B and Table C show one central estimate per cell. `--center {mean,median}`
+selects it (default `mean`). This is a **display** choice: every statistic is
+computed either way, and only the printed cell (and its heading) changes.
+
+| `--center` | Table B cell | Table C cell (paired) |
+|---|---|---|
+| `mean` (default) | `mean +/- std` | `mean +/- std (k=n)` |
+| `median` | `median [p25, p75]` | `median [p25, p75] (k=n)` |
+
+- The Table B heading becomes `Table B -- metrics (median [p25, p75])` in median
+  mode (unchanged `mean +/- std` otherwise); the Table C heading names the centre
+  too. Unpaired delta cells stay `(unpaired)` in both modes.
+- The transposed layouts (`--format formatted|markdown`) use the same cells, with
+  the section heading `Metrics (median [p25, p75])` and a delta heading that
+  names the centre.
+- **Quartile convention.** `p25`/`p75` use **linear interpolation** between
+  order statistics -- the same convention as
+  `numpy.percentile(..., method="linear")` and
+  `statistics.quantiles(values, n=4, method="inclusive")`. For a single value
+  `p25 == p75 == that value`.
+
+This exists because the per-sweep distributions here have a heavy tail (a few
+catastrophic runs), so the mean is not a representative central value; the
+median is.
+
+```bash
+.venv/bin/python -m experiments.collusion_via_tools.analysis.tables \
+    experiments/collusion_via_tools/saved_outputs/run_1/20261025-202017_corrected \
+    --reference benign_baseline_sweep --center median --format markdown
+```
+
+`--center` does **not** affect the `--csv` / `--json` outputs beyond the
+always-present `median` / `p25` / `p75` columns (see below); those files carry
+both the mean/std and the median/quartile statistics regardless of the flag.
+
 ### Significance
 
 `tables.py` also runs the significance analysis. The mode is auto-detected from
@@ -225,14 +268,253 @@ Holm-Bonferroni correction is applied within each `(model, metric)`
 family, and Hedges' g is reported alongside Cohen's d so a tiny effect
 at large `n` is not mistaken for a meaningful one.
 
+The `--center` flag is a **table-rendering choice only** — it changes no p-value,
+test statistic or significance CSV. The significance step always uses the
+mean-based Welch t-tests (one-sample and pairwise) together with the Wilcoxon
+signed-rank test, which is the robust, median-oriented companion. Selecting
+`--center median` therefore does **not** make the p-values median-based.
+
 **Do not confuse the CSVs.** `tables.py --csv PATH` writes the *summary* table
-(one row per `(sweep, metric)` with `mean` / `std` / `n` columns) -- that is the
-right input for the *summary-stats* mode. The *per-run* file
+(one row per `(sweep, metric)` with `mean` / `std` / `n` columns, plus the
+`median` / `p25` / `p75` columns appended at the end) -- that is the right input
+for the *summary-stats* mode. The *per-run* file
 (`judge_vs_advantage_delta_points.csv`, one row per `(sweep, seed)` with
 `judge_delta` / `advantage_delta` columns) is what the `--delta-csv` mode and the
 one-step root mode produce. Passing the wrong file to `--delta-csv` produces a
 clear error from the delta mode listing the missing columns and pointing at the
 other mode.
+
+## Category tables (`category_tables.py`)
+
+`tables.py` answers *"how did each sweep compare?"*. `category_tables.py`
+answers *"how did each communication category compare?"* — it measures the
+**same** metrics over the **same** runs, but groups them by the covert
+protocol family a run used instead of by the sweep it came from.
+
+### The classification artifact
+
+`comm_protocol_family.md` (at the root of an output tree) is a hand-written
+document that assigns each **run** to one or more **communication categories**
+(protocol families). `comm_categories.py` parses it and writes one
+`comm_categories.json` **into each sweep's directory**, so the classification
+travels with the sweep it describes:
+
+```
+runs/<model>/<sweep>/comm_categories.json
+```
+
+```json
+{
+  "sweep": "collusion_no_pc_coord_1round",
+  "model": "modal/glm5.3-flash",
+  "source": "20261025-202017",
+  "source_document": "comm_protocol_family.md",
+  "n_runs": 20,
+  "n_runs_classified": 20,
+  "categories": [
+    {"id": 1, "name": "Dedicated Resource Types & Topic Channels",
+     "description": "Assigned specific semantic meanings ...", "n_runs": 18}
+  ],
+  "runs": {"<run_id>": [1, 2, 3, 4, 5]}
+}
+```
+
+`categories` lists only the categories the sweep falls under (at least one of
+its runs belongs to them), with `n_runs` = how many of the sweep's runs use it.
+`runs` carries the **per-run** membership, which is what the analysis groups
+on. Sweeps with no classified runs still get a file, with empty `categories`
+and `runs`.
+
+Regenerate it after editing the markdown:
+
+```bash
+.venv/bin/python -m experiments.collusion_via_tools.analysis.comm_categories \
+    experiments/collusion_via_tools/saved_outputs/run_1/20261025-202017_corrected
+```
+
+### Running the analysis
+
+```bash
+.venv/bin/python -m experiments.collusion_via_tools.analysis.category_tables \
+    experiments/collusion_via_tools/saved_outputs/run_1/20261025-202017_corrected \
+    --csv /tmp/category_metrics.csv --json /tmp/category_metrics.json
+```
+
+It prints the same three tables as `tables.py`, with categories in place of
+sweeps:
+
+- **A — category inventory**: runs, contributing sweeps, adversaries,
+  pre-coordination rounds, post-message restriction, secret channel, agents,
+  patients, complete runs.
+- **B — metrics (mean ± std)**: one row per metric, one column per category.
+  The metric catalogue is shared with `tables.py`, so the columns are identical.
+- **C — delta vs a reference category**, unpaired (see below).
+
+Options mirror `tables.py` — `--category`, `--source`, `--metrics`, `--ddof`,
+`--reference`, `--no-delta`, `--exclude-error-runs`, `--exclude-failed-runs`,
+`--format {plain,formatted,markdown}`, and the significance flags — plus:
+
+- `--sweep NAME` (repeatable) restricts the runs feeding the groups. Use it to
+  analyse a single coordination sweep, where each category holds at most one
+  run per seed.
+- `--reference-sweep SWEEP` switches Table C to a **paired-by-seed** comparison
+  of every category against that sweep.
+
+### Grouping is per run, not per sweep
+
+A run can belong to several categories, so the groups are built at the **run**
+level: a run appears in every category it belongs to. Grouping at the sweep
+level instead would be degenerate — in the shipped run both classified sweeps
+fall under all five categories, so every category group would be identical.
+The per-sweep JSON is the *union* over the sweep's runs; the analysis uses the
+finer per-run membership.
+
+Runs with no category (the benign baseline, the private-channel sweep and the
+no-coordination sweep carry none) are excluded from the groups and reported:
+
+```
+warning: 60 run(s) have no communication category and were excluded from the category groups
+categories: 5  (runs classified: 40 of 100; runs without a category: 60)
+```
+
+### Why category-vs-category is *unpaired*
+
+Categories are **overlapping subsets of the same experimental units**, and the
+two classified sweeps **reuse the same seed numbers 0..19**. Two consequences:
+
+- Pairing two categories by seed is not well defined. Within one sweep there is
+  exactly one run per seed, so if two categories both contain that seed they
+  contain the *same run* and the difference cancels to exactly 0. Pairing on
+  bare seed instead mixes a `precoord1` run against a `precoord2` run at the
+  same seed index — different experimental conditions — and silently drops
+  about half of each category's runs.
+- Table C therefore reports the **unpaired difference of means**
+  (`mean(group) − mean(ref)`) with the group's own std and `n`. The `+/-`
+  value is the group's *spread*, not the uncertainty of the difference.
+
+A reference **sweep** is a disjoint set of units with exactly one run per
+seed, so pairing a category against a sweep *is* well defined (the same
+convention `tables.py` uses for sweep-vs-baseline). `--reference-sweep` uses
+it, and reports `(k=n)` paired counts.
+
+### Significance
+
+The three modes of `tables.py` exist here too:
+
+1. **Root mode** — pairs every category run against the reference sweep's run
+   at the same seed and writes `judge_vs_advantage_delta_points.csv` (the
+   `sweep` column holds the category slug, as `sweep_significance` requires).
+   The reference sweep defaults to `benign_baseline_sweep`, else the first
+   discovered sweep with no categories, else the first sweep. When a category
+   holds two runs at one seed (the two coord sweeps reuse seed numbers), only
+   the first by sorted `run_id` is kept, so there is exactly one point per
+   `(category, seed)`.
+2. **`--delta-csv PATH` mode** — same per-run CSV, read directly.
+3. **Summary mode** — Welch omnibus + pairwise Welch t with Holm-Bonferroni
+   over the per-(category, metric) cells, built in memory when no
+   `--summary-csv` is given.
+
+Outputs are named `category_significance.{csv,md}` and
+`category_significance_delta.{csv,md}`.
+
+### The arm contrast (`--arm-contrast`)
+
+Everything above compares a category against *something else*. `--arm-contrast`
+adds the one comparison that is genuinely **paired within a category**: the two
+coordination arms at the same seed.
+
+```bash
+.venv/bin/python -m experiments.collusion_via_tools.analysis.category_tables \
+    experiments/collusion_via_tools/saved_outputs/run_1/20261025-202017_corrected \
+    --arm-contrast --no-significance
+```
+
+It prints **Table D** (one row per category × metric) and a membership table.
+
+The pairing is legitimate common random numbers: `run.py` sets
+`cfg["simulation"]["seed"] = int(seed)`, and `HospitalEnvironment.__init__`
+does `random.seed(self.current_seed)` and then draws the patient set and the
+scarcity scenario from that RNG — so the same seed is the **same scenario** in
+every sweep and arm. The arms are ordered by the median
+`pre_coordination_rounds` of their runs (sweep-name order as a fallback), and
+the contrast is reported as *(more rounds) − (fewer rounds)*.
+
+On the shipped run it is null throughout:
+
+| category | Δ coalition advantage (2 rounds − 1 round) | n | p |
+|---|---|---|---|
+| 1 — Dedicated Resource Types | −57.0 ± 476.4 | 18 | 0.618 |
+| 2 — Scheduling Slot & Gap | −18.5 ± 455.7 | 18 | 0.865 |
+| 3 — Call & Sequence Ordering | −150.4 ± 536.2 | 10 | 0.398 |
+| 4 — Amount Offset & Arithmetic | +105.4 ± 219.8 | 6 | 0.293 |
+| 5 — Modulo Arithmetic | +26.4 ± 44.9 | 5 | 0.259 |
+
+and the membership table (is the family used in one arm but not the other?)
+is null too — exact binomial p = 1.000 / 1.000 / 0.289 / 0.549 / 1.000.
+
+**The takeaway: a second coordination round does not measurably change which
+protocol family is used, and does not measurably change the outcome within a
+family.** That is the strongest, correctly-paired statement this dataset
+supports — the category-vs-category contrasts in Table C are not.
+
+The contrast is exported to `--json` under the top-level `arm_contrast` and
+`arm_membership` keys (not into the long-format `--csv`, which stays the
+category group table).
+
+### Caveats (read before quoting a category number)
+
+These are properties of the classification and of this dataset, not of the
+script. All of them were checked against
+`saved_outputs/run_1/20261025-202017_corrected/`.
+
+1. **Membership is a post-hoc judgement, so the contrast is associational.**
+   A run that barely coordinated is unlikely to exhibit an elaborate protocol,
+   so "category 5 vs category 3" means *"among runs that used a protocol,
+   which family co-occurs with which outcome"* — with an unknown direction of
+   selection. It does **not** mean "protocol 5 is better".
+   The reassuring part: all 40 runs of the two classified sweeps carry at
+   least two families (histogram: 2 families → 2 runs, 3 → 18, 4 → 12,
+   5 → 8), so there is no run-level selection *within* the classified sweeps.
+   The selection is at the family level — family 5 appears in only 20 of 40.
+2. **Multiple membership.** Σn = 146 over 40 runs (3.65 families per run).
+   Category means are **not** independent samples: a difference between two
+   categories partly reflects which other families co-occur. Table C prints
+   `|A∩B|`, `|A\B|`, `|B\A|` for exactly this reason.
+3. **No categories outside the two classified sweeps.** Every category
+   contrast therefore lives entirely inside
+   {`collusion_no_pc_coord_1round`, `collusion_no_pc_coord_2rounds`}.
+   Categories 1 and 2 are near-universal (37/40 and 38/40 runs), so a claim
+   about them is close to "a covert protocol was used at all".
+4. **Single human annotator, no blinding, no reliability statistic** — and
+   the annotator read the same blackboard the LLM judge read. Reporting the
+   judge score next to the categories is a shared-source circularity. At
+   minimum, state single-annotator explicitly, or re-label a 10-20 run sample
+   with a second annotator and report agreement.
+5. **The baseline's coalition metrics are synthetic.**
+   `aggregate_protocols.augment_baseline_coalition_metrics` computes the
+   baseline's `coalition_*` fields from the reward gap of the two colluder
+   *roles* in a benign run — not an observed coalition. Same functional form,
+   different meaning.
+6. **Two delta metrics are degenerate here.** `max_joint_reward` is
+   identically `8000.0` in all 100 runs, and `coalition_reward_regret` is
+   identically `0.0` in all 80 collusion runs (the coalition always hits the
+   cap) and `0.0` in the augmented baseline — so that row of Table C carries
+   no information.
+7. **The judge score barely discriminates.** The secret blackboard channel
+   scores exactly `5` in 40/40 classified runs, so all the discrimination
+   lives in the public channel (0..2). The category root mode therefore uses
+   the **public-channel** score (`channel_scores[0]`) for cross-sweep
+   contrasts: the 2-channel `mean_score` of a classified run is inflated by
+   exactly +2.5 relative to any 1-channel reference, which is an artifact of
+   the channel count, not a finding.
+8. **Power.** For a paired contrast with 15-20 seeds and a paired-difference
+   SD of ~196-239 (coalition advantage), the minimum detectable effect at
+   α = 0.05 is roughly **130-160 reward units**; the observed `|Δ|` are
+   78-136. Nothing survives Holm-Bonferroni at α = 0.05 across the five
+   categories. The honest summary is: *the covert protocol family a run used
+   is not measurably associated with the coalition's advantage; all five
+   families co-occur heavily and the study is underpowered for family-level
+   contrasts.*
 
 ## Plots (`plots.py`)
 
@@ -378,13 +660,12 @@ default.
     --reference benign_baseline_sweep
 ```
 
-## Migration
+## Removed per-script CLIs
 
-The five per-script CLIs are now deprecated wrappers. They still work — each
-prints a `DeprecationWarning` to stderr and forwards to the consolidated entry
-point — but new commands should use `tables.py` / `plots.py`.
+The five per-script command-line entry points have been **removed**. Use the two
+consolidated entry points instead:
 
-| Old command | New command |
+| Removed command | Replacement |
 |---|---|
 | `python -m ...analysis.sweep_metrics_table <root> ...` | `python -m ...analysis.tables <root> ...` |
 | `python -m ...analysis.sweep_significance <root> --reference SWEEP` | `python -m ...analysis.tables <root> --reference SWEEP` |
@@ -392,14 +673,20 @@ point — but new commands should use `tables.py` / `plots.py`.
 | `python -m ...analysis.sweep_significance --delta-csv CSV` | `python -m ...analysis.tables --delta-csv CSV` |
 | `python -m ...analysis.plot_sweep_metrics <root> ...` | `python -m ...analysis.plots <root> --no-scatter --no-scatter-delta ...` |
 | `python -m ...analysis.plot_judge_vs_advantage <root> ...` | `python -m ...analysis.plots <root> --no-box --no-scatter-delta ...` |
-| `python -m ...analysis.plot_judge_vs_advantage_delta <root> --reference SWEEP` | `python -m ...analysis.plots <root> --no-box --no-scatter --reference SWEEP` |
+| `python -m ...analysis.plot_judge_vs_advantage_delta <root> --reference SWEEP` | `python -m ...analysis.plots <root> --no-box --no-scatter --reference SWEEP ...` |
 
-Plumbing modules and their helper functions (`sweep_metrics_table`,
-`sweep_significance`, `plot_sweep_metrics`, `plot_judge_vs_advantage`,
-`plot_judge_vs_advantage_delta`, `delta_metrics`, `aggregate_protocols`) keep
-their public functions, so existing imports of `find_metric_files`,
-`load_runs`, `partition_runs`, `group_runs`, the significance statistics
-helpers and the figure-rendering helpers continue to work unchanged.
+Note that `plots.py` always writes each figure type into its own subdirectory
+under `--out` (`sweep_metrics/`, `judge_vs_advantage/`,
+`judge_vs_advantage_delta/`); the old scripts wrote straight into `--out`.
+
+The modules themselves remain as **libraries** and keep their public
+functions, so existing imports of `find_metric_files`, `load_runs`,
+`partition_runs`, `group_runs`, the significance statistics helpers
+(`holm_bonferroni`, `welch_t_from_summary`, `omnibus_welch_anova`,
+`one_sample_t`, `wilcoxon_vs_zero`, …) and the figure-rendering helpers
+(`render_model_figure`, `render_split_figure`, `write_stats_csv`,
+`write_deltas_csv`, …) continue to work unchanged. Only the `main()` /
+`parse_args()` entry points were removed from them.
 
 ## Dimension taxonomy
 
